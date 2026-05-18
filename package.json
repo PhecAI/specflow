@@ -1,0 +1,12 @@
+{
+  "name": "specflow",
+  "private": true,
+  "description": "Engine-driven SDD AI coding workflow: harness (skills/agents/hooks) executes, specflow-engine decides phase gates—Specify→Plan→Implement→QA→Archive for large-team iteration.",
+  "scripts": {
+    "install:local": "node dev-scripts/install-local.cjs",
+    "test": "node --test --test-concurrency=1 tests/run-engine-tests.cjs tests/run-layout-guard.cjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
