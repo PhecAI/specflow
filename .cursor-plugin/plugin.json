@@ -3,6 +3,7 @@
   "displayName": "SpecFlow",
   "description": "Engine-driven SDD AI coding workflow: harness (skills/agents/hooks) executes, specflow-engine decides phase gates—Specify→Plan→Implement→QA→Archive for large-team iteration.",
   "version": "1.0.0",
+  "logo": "assets/logo.png",
   "license": "MIT",
   "repository": "https://github.com/PhecAI/specflow",
   "homepage": "https://github.com/PhecAI/specflow#readme",
