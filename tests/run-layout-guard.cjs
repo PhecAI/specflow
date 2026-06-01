@@ -8,6 +8,11 @@ const fs = require('fs')
 const path = require('path')
 
 const ROOT = path.join(__dirname, '..')
+const {
+  parseMarkdownTree,
+  buildFocusSpecify,
+  isSpecifyCompleteFromTree,
+} = require(path.join(ROOT, 'tools', 'plan-parser.cjs'))
 
 function walk(dir, acc = []) {
   if (!fs.existsSync(dir)) return acc
@@ -39,6 +44,54 @@ test('layout-guard: 顶层运行时目录齐全（tools/protocols/templates/docs
   for (const dir of ['tools', 'protocols', 'templates', 'docs']) {
     assert.ok(fs.existsSync(path.join(ROOT, dir)), `缺失顶层目录：${dir}`)
   }
+})
+
+test('specify-template: 使用功能切片结构，不再生成独立 AC 章节', () => {
+  const tpl = fs.readFileSync(path.join(ROOT, 'templates', 'specify-template.md'), 'utf8')
+  assert.match(tpl, /specflow:section=capabilities/)
+  assert.match(tpl, /验收要点/)
+  assert.doesNotMatch(tpl, /默认假设|推断/)
+  assert.doesNotMatch(tpl, /specflow:section=acceptance-criteria/)
+  assert.doesNotMatch(tpl, /^##\s+\d+\.\s+Acceptance Criteria/m)
+})
+
+test('plan-parser: 新 Specify 结构可判定完整并进入 focusSpecify', () => {
+  const md = `# Spec
+
+## Requirement Overview
+<!-- specflow:section=overview -->
+- **目标**: 完成素材管理。
+
+## Product Decisions & Boundaries
+<!-- specflow:section=product-decisions -->
+- **已确认产品决策**: 本期先支持 Mock 推进。
+
+## Capabilities
+<!-- specflow:section=capabilities -->
+### 3.1 素材批量上传
+- **用户目标**: 批量上传素材。
+- **验收要点**:
+  - 未选择文件时不能提交。
+
+## Business Objects & States
+<!-- specflow:section=business-objects -->
+- **素材**: 创意资产。
+
+## Decision Log
+<!-- specflow:section=clarification-log -->
+无额外决策记录。
+
+## Changelog
+<!-- specflow:section=changelog -->
+- Initial
+`
+  const tree = parseMarkdownTree(md)
+  assert.equal(isSpecifyCompleteFromTree(tree), true)
+  const focus = buildFocusSpecify(tree)
+  assert.match(focus, /Requirement Overview/)
+  assert.match(focus, /Capabilities/)
+  assert.match(focus, /素材批量上传/)
+  assert.doesNotMatch(focus, /Decision Log/)
 })
 
 test('layout-guard: 仓库内不应再出现 specflow-assets 路径片段', () => {

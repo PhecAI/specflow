@@ -2,10 +2,10 @@
  * Domain Knowledge 结构化合并模块
  *
  * 职责：
- * - 规范化 knowledge-patch 条目的 category（entity / rule / stateMachine / ui / techDebt）
- * - 解析全局 `ai-docs/global-assets/domains/<domain>.md` 的四段结构化表格
+ * - 规范化 knowledge-patch 条目的 category（entity / rule / stateMachine / formula / pitfall / ui / techDebt）
+ * - 解析全局 `ai-docs/global-assets/domains/<domain>.md` 的结构化表格
  * - 按 category 分桶合并新 patch 到既有 md，并回写 frontmatter（置信度阶梯化）
- * - `ui` 类别不回流全局（仅留在需求级），其余四类参与合并
+ * - `ui` 类别不回流全局（仅留在需求级），其余业务裁判类参与合并
  * - 老 bullet list 与新结构表格并存（向下兼容 migrate_manual 策略）
  *
  * 设计约束：
@@ -14,8 +14,17 @@
  *   并新增 `sourceRequirementIds` 数组用于阶梯化判定
  */
 
-const KNOWLEDGE_CATEGORIES = ['entity', 'rule', 'stateMachine', 'ui', 'techDebt']
-const REFLOW_CATEGORIES = new Set(['entity', 'rule', 'stateMachine', 'techDebt'])
+const KNOWLEDGE_CATEGORIES = ['entity', 'rule', 'stateMachine', 'formula', 'pitfall', 'ui', 'techDebt']
+const REFLOW_CATEGORIES = new Set(['entity', 'rule', 'stateMachine', 'formula', 'pitfall', 'techDebt'])
+
+const DOMAIN_BUDGET = {
+  summaryRows: 5,
+  entityRows: 15,
+  ruleRows: 30,
+  stateMachineObjects: 2,
+  formulaRows: 8,
+  pitfallRows: 10,
+}
 
 // 置信度阶梯阈值：出现在 N 个需求里 → 何种 status/confidence
 const CONFIDENCE_LADDER = [
@@ -25,17 +34,24 @@ const CONFIDENCE_LADDER = [
 ]
 
 const SECTION_HEADINGS = {
+  summary: '## 领域摘要',
   entity: '## 统一语言 & 实体',
   rule: '## 稳定业务规则',
   stateMachine: '## 状态机 / 门禁',
+  formula: '## 核心公式',
+  pitfall: '## 避坑 / 风险',
   techDebt: '## 技术债 & TODO',
+  evidence: '## 证据附录',
   legacy: '## Legacy (pre-migration)',
 }
 
 const TABLE_HEADERS = {
+  summary: ['项', '内容'],
   entity: ['术语', '语义', '约束 / 枚举', '来源'],
   rule: ['场景', '规则', '强度', '来源'],
   stateMachine: ['前置', '条件', '后续', '来源'],
+  formula: ['场景', '公式 / 计算', '适用边界', '来源'],
+  pitfall: ['场景', '避坑 / 风险', '影响', '来源'],
   techDebt: ['id', '描述', 'owner', '来源'],
 }
 
@@ -47,6 +63,8 @@ function normalizeKnowledgeCategory(raw) {
   ) {
     return 'stateMachine'
   }
+  if (['formula', 'calculation', 'compute', 'metric', '公式', '计算', '指标'].includes(v)) return 'formula'
+  if (['pitfall', 'lesson', 'risk', 'gotcha', '避坑', '风险', 'lessons'].includes(v)) return 'pitfall'
   if (['ui', 'ux', 'interaction', 'layout', '交互', '布局'].includes(v)) return 'ui'
   if (['techdebt', 'tech-debt', 'tech_debt', 'debt', 'todo', '技术债'].includes(v)) return 'techDebt'
   if (['rule', 'business-rule', 'business_rule', '业务规则', ''].includes(v)) return 'rule'
@@ -191,6 +209,10 @@ function rowKey(category, cols) {
       return `rule::${c(0)}::${c(1)}`
     case 'stateMachine':
       return `sm::${c(0)}::${c(1)}::${c(2)}`
+    case 'formula':
+      return `formula::${c(0)}::${c(1)}`
+    case 'pitfall':
+      return `pitfall::${c(0)}::${c(1)}`
     case 'techDebt':
       return `td::${c(0) || c(1)}`
     default:
@@ -208,6 +230,8 @@ function rowKey(category, cols) {
 //   enum,               // entity: 枚举或约束，字符串或数组
 //   strength,           // rule: hard | soft
 //   from, condition, to, // stateMachine
+//   formula, boundary,  // formula
+//   impact,             // pitfall
 //   id, owner,          // techDebt
 //   applies,            // 可选：glob 列表（代码规范预留）
 //   sourceRequirementId
@@ -254,6 +278,18 @@ function patchToRow(category, patch, defaultSource) {
       const cond = readPatchField(patch, 'condition')
       const to = readPatchField(patch, 'to')
       return [from, cond, to, source]
+    }
+    case 'formula': {
+      const scope = readPatchField(patch, 'scope') || '通用'
+      const formula = readPatchField(patch, 'formula') || content
+      const boundary = readPatchField(patch, 'boundary') || readPatchField(patch, 'condition')
+      return [scope, formula, boundary, source]
+    }
+    case 'pitfall': {
+      const scope = readPatchField(patch, 'scope') || '通用'
+      const risk = content
+      const impact = readPatchField(patch, 'impact') || readPatchField(patch, 'owner')
+      return [scope, risk, impact, source]
     }
     case 'techDebt': {
       const id = readPatchField(patch, 'id')
@@ -318,11 +354,48 @@ function renderSectionTable(category, rows) {
   return lines.join('\n')
 }
 
+function defaultSummaryRows(domainName) {
+  return [
+    ['职责边界', `维护 ${domainName || '本领域'} 的长期业务裁判规则`],
+    ['核心实体', 'TBD'],
+    ['关键门禁', 'TBD'],
+    ['常见冲突', 'TBD'],
+    ['非目标', 'TBD'],
+  ]
+}
+
+function countDistinctStateObjects(rows) {
+  const set = new Set()
+  for (const row of rows || []) {
+    const raw = String((row && row[0]) || '').trim()
+    if (!raw) continue
+    const objectName = raw.split(/[：:]/)[0].trim()
+    set.add(objectName || raw)
+  }
+  return set.size
+}
+
+function computeDomainBudgetUsage(parsed) {
+  const buckets = (parsed && parsed.buckets) || {}
+  const summaryRows = (buckets.summary || []).length
+  const entityRows = (buckets.entity || []).length
+  const ruleRows = (buckets.rule || []).length
+  const stateMachineObjects = countDistinctStateObjects(buckets.stateMachine || [])
+  const formulaRows = (buckets.formula || []).length
+  const pitfallRows = (buckets.pitfall || []).length + (buckets.techDebt || []).length
+  const usage = { summaryRows, entityRows, ruleRows, stateMachineObjects, formulaRows, pitfallRows }
+  const overBudget = Object.entries(usage)
+    .filter(([key, value]) => value > DOMAIN_BUDGET[key])
+    .map(([key, value]) => ({ key, value, limit: DOMAIN_BUDGET[key] }))
+  return { usage, limits: DOMAIN_BUDGET, overBudget }
+}
+
 function parseDomainMd(md) {
   const { data: frontmatter, body } = parseFrontmatter(md)
   const sections = splitBodyIntoSections(body)
-  const buckets = { entity: [], rule: [], stateMachine: [], techDebt: [] }
+  const buckets = { summary: [], entity: [], rule: [], stateMachine: [], formula: [], pitfall: [], techDebt: [] }
   const legacyLines = []
+  const evidenceLines = []
   let preambleH1 = null
   for (const sec of sections) {
     if (sec.heading === '__preamble__') {
@@ -337,11 +410,24 @@ function parseDomainMd(md) {
     }
     const heading = sec.heading
     let matched = false
+    if (/^#\s+/.test(heading)) {
+      if (!preambleH1) preambleH1 = heading
+      for (const l of sec.lines) {
+        if (String(l || '').trim()) legacyLines.push(l)
+      }
+      matched = true
+      continue
+    }
     for (const key of Object.keys(SECTION_HEADINGS)) {
       if (key === 'legacy') continue
+      if (key === 'evidence' && heading.startsWith(SECTION_HEADINGS[key])) {
+        evidenceLines.push(...sec.lines)
+        matched = true
+        break
+      }
       if (heading.startsWith(SECTION_HEADINGS[key])) {
         const { dataRows } = parseSectionRows(key, sec.lines)
-        buckets[key].push(...dataRows)
+        if (buckets[key]) buckets[key].push(...dataRows)
         matched = true
         break
       }
@@ -351,10 +437,23 @@ function parseDomainMd(md) {
       legacyLines.push(heading, ...sec.lines)
     }
   }
-  return { frontmatter: frontmatter || null, preambleH1, buckets, legacyLines }
+  return { frontmatter: frontmatter || null, preambleH1, buckets, legacyLines, evidenceLines }
 }
 
-function renderDomainMd({ frontmatter, preambleH1, buckets, legacyLines }) {
+function renderEvidenceAppendix(lines) {
+  const trimmed = (lines || []).map((l) => String(l || '')).filter((l) => l.trim() !== '')
+  const out = [SECTION_HEADINGS.evidence, '']
+  out.push('> 主知识库只保留默认注入的裁判规则；字段细节、代码路径、边界案例和被折叠信息下沉到这里，按需追溯。', '')
+  if (trimmed.length === 0) {
+    out.push('_(暂无)_', '')
+  } else {
+    for (const l of trimmed) out.push(l)
+    out.push('')
+  }
+  return out.join('\n')
+}
+
+function renderDomainMd({ frontmatter, preambleH1, buckets, legacyLines, evidenceLines }) {
   const parts = []
   if (frontmatter) {
     parts.push(renderFrontmatter(frontmatter))
@@ -363,9 +462,14 @@ function renderDomainMd({ frontmatter, preambleH1, buckets, legacyLines }) {
     }
   }
   if (preambleH1) parts.push(preambleH1, '')
-  for (const key of ['entity', 'rule', 'stateMachine', 'techDebt']) {
-    parts.push(renderSectionTable(key, buckets[key] || []))
+  const domainName = (frontmatter && frontmatter.domain) || String(preambleH1 || '').replace(/^#\s+/, '')
+  const nextBuckets = buckets || {}
+  const summaryRows = (nextBuckets.summary || []).length > 0 ? nextBuckets.summary : defaultSummaryRows(domainName)
+  parts.push(renderSectionTable('summary', summaryRows))
+  for (const key of ['entity', 'rule', 'stateMachine', 'formula', 'pitfall', 'techDebt']) {
+    parts.push(renderSectionTable(key, nextBuckets[key] || []))
   }
+  parts.push(renderEvidenceAppendix(evidenceLines))
   const trimmedLegacy = (legacyLines || []).map((l) => String(l || '')).filter((l) => l.trim() !== '')
   if (trimmedLegacy.length > 0) {
     parts.push(SECTION_HEADINGS.legacy, '')
@@ -425,6 +529,7 @@ function mergePatchesIntoDomainMd(existingMd, domainName, patches, options = {})
     preambleH1: parsed.preambleH1 || `# ${domainName}`,
     buckets: parsed.buckets,
     legacyLines: parsed.legacyLines,
+    evidenceLines: parsed.evidenceLines,
   })
   return {
     md: nextMd,
@@ -437,6 +542,7 @@ function mergePatchesIntoDomainMd(existingMd, domainName, patches, options = {})
 
 module.exports = {
   KNOWLEDGE_CATEGORIES,
+  DOMAIN_BUDGET,
   CONFIDENCE_LADDER,
   SECTION_HEADINGS,
   TABLE_HEADERS,
@@ -457,6 +563,8 @@ module.exports = {
   formatRow,
   upsertRow,
   renderSectionTable,
+  defaultSummaryRows,
+  computeDomainBudgetUsage,
   parseDomainMd,
   renderDomainMd,
   mergePatchesIntoDomainMd,

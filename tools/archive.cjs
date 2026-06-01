@@ -1,6 +1,6 @@
 /**
  * 归档原子操作：按年/季路径创建目录、搬运 ai-docs/{需求号} 下全部文件、更新 ARCHIVE_SUMMARY 索引、删除原目录。
- * 归档后自动执行知识瘦身：精简 specify.md（仅保留 Section 1, 2, 4 作为立项快照）、删除 plan.md。
+ * 归档后自动执行知识瘦身：精简 specify.md（仅保留需求概览、产品决策与功能切片快照）、删除 plan.md。
  * 执行前须已在 ai-docs/{需求号}/ 下生成 summary.md（可由 AI 在 Archive 阶段先填写）；本脚本不生成 summary 内容。
  *
  * 用法:
@@ -17,8 +17,9 @@ const UTF8 = 'utf-8';
 
 /**
  * 精简 specify.md（使用健壮的 AST 解析器）：
- * 仅保留 H1 标题 + Executive Summary + User Roles & Scenarios + Acceptance Criteria。
- * 丢弃已被抽象到领域活文档的 Business Rules，以及过程性的 Clarification Log 和 Changelog。
+ * 新结构保留 H1 标题 + Requirement Overview + Product Decisions + Capabilities。
+ * 旧结构回退保留 Executive Summary + User Roles & Scenarios + Acceptance Criteria。
+ * 丢弃过程性的 Clarification Log / Decision Log 和 Changelog。
  * @param {string} content - specify.md 原始内容
  * @returns {string} 精简后的内容
  */
@@ -37,7 +38,13 @@ function slimSpecifyContent(content) {
   }
 
   // 2. 按需保留核心章节（利用锚点精确提取，无视用户的额外 H2 排版）
-  const keepKeys = ['executiveSummary', 'userScenarios', 'acceptanceCriteria'];
+  const hasNewStructure =
+    findByKey(tree, 'overview') ||
+    findByKey(tree, 'productDecisions') ||
+    findByKey(tree, 'capabilities');
+  const keepKeys = hasNewStructure
+    ? ['overview', 'productDecisions', 'capabilities']
+    : ['executiveSummary', 'userScenarios', 'acceptanceCriteria'];
   for (const key of keepKeys) {
     const section = findByKey(tree, key);
     if (section) {
@@ -46,7 +53,7 @@ function slimSpecifyContent(content) {
   }
 
   let slimmed = parts.join('\n\n---\n\n');
-  slimmed += '\n\n---\n> 归档精简：仅保留业务背景、用户场景与验收标准作为立项快照，完整的长效业务流转规则请查阅当前需求目录下 `business-domains/` 的活体领域文档。\n';
+  slimmed += '\n\n---\n> 归档精简：仅保留需求概览、产品决策与功能切片作为立项快照，完整的长效业务流转规则请查阅当前需求目录下 `business-domains/` 的活体领域文档。\n';
   return slimmed;
 }
 

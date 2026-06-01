@@ -8,9 +8,8 @@
  * - 本脚本只提供两类**幂等 IO 原语**：
  *     1. init          建 `ai-docs/global-assets/` 空壳目录 + 空 index.md / 空
  *                      metadata.json / 默认 code-style.md（存在则不覆盖）。
- *     2. add-domain    根据 agent 显式传入的 `--name <slug> --source <hint>`
- *                      幂等写入 `domains/<slug>.md` + index.md 行 + metadata 条目。
- * - `normalizeDomainName` 仅做 slug 字符规范化（非策略），可被其他原语复用。
+ *     2. add-domain    根据 agent 显式传入的 `--ref <scope>::<slug> --source <hint>`
+ *                      幂等写入 `domains/<scope__slug>.md` + index.md 行 + metadata 条目。
  *
  * 用法：
  *   init（空壳）:
@@ -21,13 +20,14 @@
  *   add-domain（由 agent 调用）:
  *     PLUGIN_ROOT=/path/to/specflow \
  *       node "$PLUGIN_ROOT/tools/inventory-scan.cjs" \
- *       add-domain --workspace <ws> --name <slug> --source "<evidence-path-or-hint>"
+ *       add-domain --workspace <ws> --ref <scope>::<slug> --source "<evidence-path-or-hint>"
  *
  * 输出：JSON 到 stdout
  */
 
 const fs = require('fs')
 const path = require('path')
+const { normalizeDomainInitRef, domainRefToFileStem } = require('./specflow-state.cjs')
 
 const UTF8 = 'utf-8'
 
@@ -82,7 +82,7 @@ function loadDomainTemplate() {
 }
 
 function buildDomainSkeleton(domain, sourceHint) {
-  const d = normalizeDomainName(domain) || 'unnamed'
+  const d = String(domain || '').trim() || 'unnamed'
   const src = String(sourceHint || '').trim()
 
   const tpl = loadDomainTemplate()
@@ -155,6 +155,7 @@ function runInventoryScan(workspaceRoot) {
   const metadataPath = path.join(globalAssetsDir, 'metadata.json')
   const indexPath = path.join(domainsDir, 'index.md')
   const codeStylePath = path.join(standardsDir, 'code-style.md')
+  const architectureLayersPath = path.join(standardsDir, 'architecture-layers.md')
 
   ensureDir(domainsDir)
   ensureDir(standardsDir)
@@ -163,6 +164,12 @@ function runInventoryScan(workspaceRoot) {
     const templatePath = path.join(__dirname, '..', 'templates', 'code-style.md')
     const templateText = safeReadText(templatePath, '# Code Style\n\n')
     fs.writeFileSync(codeStylePath, templateText, UTF8)
+  }
+
+  if (!fs.existsSync(architectureLayersPath)) {
+    const templatePath = path.join(__dirname, '..', 'templates', 'architecture-layers.md')
+    const templateText = safeReadText(templatePath, '# Architecture Layers\n\n')
+    fs.writeFileSync(architectureLayersPath, templateText, UTF8)
   }
 
   ensureIndexSkeleton(indexPath)
@@ -177,14 +184,16 @@ function runInventoryScan(workspaceRoot) {
     domainsDir: path.relative(workspaceRoot, domainsDir),
     indexPath: path.relative(workspaceRoot, indexPath),
     codeStylePath: path.relative(workspaceRoot, codeStylePath),
+    architectureLayersPath: path.relative(workspaceRoot, architectureLayersPath),
     metadataPath: path.relative(workspaceRoot, metadataPath),
   }
 }
 
 function runAddDomain({ workspaceRoot, name, source }) {
-  const slug = normalizeDomainName(name)
-  if (!slug) {
-    return { ok: false, error: '缺少或无效的 --name <slug>' }
+  const ref = normalizeDomainInitRef(name)
+  const stem = domainRefToFileStem(ref)
+  if (!ref || !stem) {
+    return { ok: false, error: '缺少或无效的 --ref <scope>::<slug>' }
   }
   const src = String(source || '').trim()
 
@@ -196,20 +205,20 @@ function runAddDomain({ workspaceRoot, name, source }) {
   ensureDir(domainsDir)
   ensureIndexSkeleton(indexPath)
 
-  const domainPath = path.join(domainsDir, `${slug}.md`)
+  const domainPath = path.join(domainsDir, `${stem}.md`)
   let created = false
   if (!fs.existsSync(domainPath)) {
-    fs.writeFileSync(domainPath, buildDomainSkeleton(slug, src), UTF8)
+    fs.writeFileSync(domainPath, buildDomainSkeleton(ref, src), UTF8)
     created = true
   }
 
-  const indexResult = appendIndexRowIfMissing(indexPath, slug, src)
+  const indexResult = appendIndexRowIfMissing(indexPath, stem, src)
 
   const metadata = safeReadJson(metadataPath, {})
   let metadataUpdated = false
-  if (!metadata[slug]) {
-    metadata[slug] = {
-      domain: slug,
+  if (!metadata[stem]) {
+    metadata[stem] = {
+      domain: ref,
       maintainer: 'inventory-scanner',
       sourceRequirementIds: [],
       status: 'Draft',
@@ -225,7 +234,8 @@ function runAddDomain({ workspaceRoot, name, source }) {
 
   return {
     ok: true,
-    domain: slug,
+    domain: ref,
+    domainKey: stem,
     source: src || null,
     created,
     indexAppended: indexResult.appended,
@@ -256,7 +266,7 @@ function main() {
   }
 
   if (sub === 'add-domain') {
-    const name = named['name'] || named['n'] || positional[1] || ''
+    const name = named['ref'] || named['domain-ref'] || positional[1] || ''
     const source = named['source'] || named['s'] || positional[2] || ''
     const result = runAddDomain({ workspaceRoot, name, source })
     console.log(JSON.stringify(result, null, 2))

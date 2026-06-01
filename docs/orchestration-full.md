@@ -34,13 +34,14 @@
 - **需求号**：有则传入；否则不传，由脚本探测。
 - **变更拦截**：用户要求直接改代码/接口/字段/交互，且处于 Implement 且未通过 `sync-document` 同步时，**禁止**直接改代码；引导 `syncing-specflow-docs` 流程。
 - **init（需求号）**：已由引擎统一为 **`interaction_required`**，包含 **`init_requirement_id`（可选，至多 2 个单选）** + **`init_requirement_text`（必有，手动输入，引擎标注 `responseType: 'text'` 以提示输入框）**。编排合并规则：**若 `init_requirement_text` 非空**，以其为准作为需求号；否则取 `init_requirement_id` 所选。元数据见 `init_context`。确认需求号前禁止创建文档或派发 specify/plan。
-- **Plan 进入确认（尚无 plan.md）**：**仅当 Clarification Log 无未闭合的阻塞性 `[?]`（引擎判定 `clarificationOpen` 为假）且 `canProceedToPlan` 为真时**才会出现 `confirm_start_plan`；`confirm_start_plan` 选确认 → `manage-state.cjs ack-specify-before-plan ...` 后再跑引擎；若之后修改 `specify.md`，摘要门控会要求再次确认（mtime 对比）。未闭合澄清较多时，引擎 **`questions` 每轮最多 3 条**，其余需在 `specify.md` 中填写 **[User]**。**架构师反向打回（接口文档补全等）依赖此 CQ 门禁，编排不得跳过。**
-- **Plan（无接口/字段依据）**：若规格与可引用材料中**仍无可落地**的接口与字段变更说明，`specflow-plan` **必须**仅在 `specify.md` 增加未闭合 `[?]`（如 `CQ-Contract-*` / `CQ-Tech-*`）并结束本轮；**禁止**先写满 `plan.md` 再靠猜测字段与接口进入实现。用户闭合澄清后再派发 plan。
+- **阶段显式化**：引擎会输出 `Init / Specify / PlanReadiness / Plan / Implement / Archive`。`PlanReadiness` 负责技术方案前置评审、技术澄清与开始 Plan 的用户确认；真正进入 `Plan` 时才派发 `specflow-plan`。
+- **Plan 进入确认（尚无 plan.md）**：**仅当正式 `specify.md` 无未闭合 `[?]`、`canProceedToPlan` 为真，且 Plan Readiness 当前快照通过时**才会出现 `confirm_start_plan`；`confirm_start_plan` 选确认 → `manage-state.cjs ack-specify-before-plan ...` 后再跑引擎；若之后修改 `specify.md`，确认会因快照不一致失效并要求再次确认。未闭合澄清应存在于临时澄清状态或最小草稿中，编排不得跳过。
+- **Plan（无接口/字段依据）**：若规格与可引用材料中**仍无可落地**的接口与字段变更说明，`specflow-plan` **必须**生成技术澄清状态并结束本轮；**禁止**先写满 `plan.md` 再靠猜测字段与接口进入实现。用户闭合澄清后再派发 plan，结论写入 plan §1.3。
 - **Implement / Group**：`confirm_start_group` 选 **自动托管** → `set-active-group <id> --auto`（`autoProceedGroups=true`），后续 Group 边界**免确认**直至完成；仅 **确认**（不带 `--auto`）则**每个**新 Group 都弹窗。取消托管：再次 `set-active-group <id>` **不带** `--auto`。
 - **Group 确认**：`manage-state.cjs set-active-group ...` 后再跑引擎。
 - **归档锚点（Archive）**：Roadmap 全绿后，引擎**不自动**开始任何合并/归档子代理，也**不弹 AskQuestion**；而是返回 `type: 'anchor'` + `next.action: 'set-archive-anchor'` 的文字提示。理由：测试期间需求可能仍在变动，过早合并知识/代码规范会把未冻结的结论灌入全局资产。编排层见到此 anchor **只展示文字并结束本轮**；当用户下一轮明确表达归档意图（「开始归档」「确认归档」等）后，再调 `manage-state.cjs set-archive-anchor [workspaceRoot] <需求号>` 并跑引擎；后续才会依次 `dispatch`：`specflow-domain-explorer`（Merge）→ `specflow-knowledge-reviewer` → `specflow-archive`。历史需求（`inHistory=true`）跳过此锚点直接 dispatch `specflow-archive`。
 - **资源失败**：见 `docs/troubleshooting.md` 与 `resource-load-failed.json`。
-- **业务知识库（尚无 `specify.md`）**：不再弹出 `domain_init_*` 交互。引擎默认按需求内流程自动初始化知识库（默认领域 `general`，若 state 中已有 `domainInitSlug` 则复用），并在 `ai-docs/<需求号>/business-domains/<slug>.md` 缺失时先 `dispatch specflow-domain-explorer`，完成后再 `specflow-specify`。
+- **业务知识库（尚无 `specify.md`）**：不再弹出旧单 slug 交互。引擎按需求内流程初始化知识库，领域身份统一为 `<scope>::<slug>`（如 `services/order::payment`），确认结果写入 `domainInitRefs`；若 `ai-docs/<需求号>/business-domains/<scope__slug>.md` 缺失时先 `dispatch specflow-domain-explorer`，完成后再 `specflow-specify`。
 
 ### 2. 行为决策
 
@@ -86,4 +87,3 @@ Roadmap 任务复选框通过 `manage-state.cjs` 变更：**优先 `mark-group` 
 - **脚本**：`tools/README.md`（直接执行目标脚本，勿跳过 orchestrator/change 分流）。
 - **协议 JSON**：`protocols/specify.md`、`plan.md`、`implement.md`、`qa.md`、`archive.md`。
 - **故障排查**：`docs/troubleshooting.md`。
-

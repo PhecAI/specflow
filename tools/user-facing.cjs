@@ -32,8 +32,12 @@ function applyVariables(templateBody, variables) {
 
 function mapPhaseToChinese(phase) {
   switch (phase) {
+    case 'Init':
+      return '初始化'
     case 'Specify':
       return '规格梳理'
+    case 'PlanReadiness':
+      return '技术方案准备'
     case 'Plan':
       return '技术方案'
     case 'Implement':
@@ -68,8 +72,7 @@ function mapRequirementTemplate(initKind, hasSuggestedId) {
 }
 
 function mapInteractionTemplate(questionId) {
-  // 当前无针对单个 question id 的特化模板，统一走通用交互模板。
-  void questionId
+  if (String(questionId || '') === 'confirm_start_plan') return 'orchestration.plan_confirm'
   return 'orchestration.interaction'
 }
 
@@ -77,6 +80,7 @@ function mapGenericTitle(templateId) {
   const id = String(templateId || '')
   if (id === 'orchestration.dispatch') return '下一步'
   if (id === 'orchestration.clarification') return '待确认信息'
+  if (id === 'orchestration.plan_confirm') return '开始技术方案'
   if (id === 'orchestration.interaction') return '需要你的确认'
   if (id.startsWith('orchestration.requirement_id')) return '需求编号确认'
   if (id === 'orchestration.unknown') return '提示'
@@ -234,12 +238,16 @@ function buildUserFacing(result) {
       const q0 = questions[0]
       const qid = q0 && q0.id ? String(q0.id) : ''
       const templateId = mapInteractionTemplate(qid)
+      const fallbackMessage =
+        qid === 'confirm_start_plan'
+          ? '需求说明已就绪，技术前置问题也已处理完。请确认是否开始生成技术方案。'
+          : '这里需要你先确认一个选项。'
 
       return finish({
         schemaVersion,
         templateId,
         variables: {},
-        fallbackMessage: '这里需要你先确认一个选项。',
+        fallbackMessage,
       })
     }
     case 'dispatch': {

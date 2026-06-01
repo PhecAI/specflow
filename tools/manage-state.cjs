@@ -7,7 +7,7 @@
  *   get              — 输出当前 state JSON
  *   set-archive-anchor  — 设置 archiveAnchorDone: true（用户主动确认归档后调用）
  *   clear-archive-anchor — 删除 archiveAnchorDone 属性（归档完成后调用）
- *   set-code-style-explored — 由 specflow-code-style-explorer 完成需求级规范评估后回写（codeStyleExplored=true + 当前 specify.md mtime）
+ *   set-code-style-explored — 兼容旧流程；当前主流程不再用它作为 Plan 前门禁
  *   set-active-group <groupId> [--auto] — 设置当前活跃的 Group ID；**--auto** 开启自动托管（`autoProceedGroups=true`，后续 Group 边界免 confirm）；不带 --auto 会清除自动托管
  *   mark-task <taskId> <status> [evidence] — 变更 plan.md 中指定任务的状态（含转换校验与日志）
  *     status: pending | ready-for-qa | failed | completed
@@ -20,12 +20,13 @@
  *     当 status=completed 时，必须传入 evidence
  *   clear-resource-failed [url] — 从 .temp/resource-load-failed.json 的失败映射中移除：指定 url 则只删该 key；不传 url 则清空整个文件
  *   reset-retry — 重置 groupRetryCount 为 0（死循环保护后人工修复用）
- *   ack-specify-before-plan — 记录用户已在弹窗确认进入 Plan（写入 ackSpecifyBeforePlan + specify.md 的 mtime）
- *   ack-specify-review — 记录架构师已完成对 specify 的评审且无阻塞（写入 specifyReviewPassedMtime = 当前 specify.md mtime；spec 变更后失效）
+ *   ack-specify-before-plan — 记录用户已在弹窗确认进入 Plan（写入 gates.json: plan.user_confirm_start；兼容写入旧 state mtime）
+ *   ack-specify-review [confirmed|mock_allowed|not_required] — 记录架构师已完成对 specify 的评审且无阻塞（写入 gates.json: plan.readiness_review；兼容写入旧 state）
+ *   mark-specify-review-blocked [reason] — 记录技术前置评审阻塞（写入 gates.json: plan.readiness_review=blocked；仍应生成技术澄清状态）
  *   ack-auto-clarifications — 记录用户已审阅并确认自动解决的澄清（写入 autoClarificationAckMtime = 当前 specify.md mtime）
- *   set-domain-init-pref <scan|skip> [领域标识] — 记录业务知识库领域初始化结果。scan 时必须提供领域标识（如 payment，支持逗号分隔），写入 domainInitSlugs + domainInitSlug(=首个)；并清空 domainInitCandidates。skip 时清除所有领域字段
- *   set-domain-init-candidates <slug_csv> — S1 阶段：agent 分析项目后提交领域候选（逗号分隔），写入 domainInitCandidates；引擎下一轮基于候选生成 N 道 yes/no 采纳题
- *   clear-domain-init-candidates — 清空 domainInitCandidates（用于反悔 / 重新提交）
+ *   set-domain-init-pref <scan|skip> [领域身份] — 记录业务知识库领域初始化结果。scan 时必须提供领域身份（如 services/order::payment，支持逗号分隔），写入 domainInitRefs；并清空 domainInitCandidateRefs。skip 时清除所有领域字段
+ *   set-domain-init-candidates <ref_csv> — S1 阶段：agent 分析项目后提交领域身份候选（逗号分隔），写入 domainInitCandidateRefs；引擎下一轮基于候选生成 N 道 yes/no 采纳题
+ *   clear-domain-init-candidates — 清空 domainInitCandidateRefs（用于反悔 / 重新提交）
  *
  * 输出: JSON 到 stdout
  */
@@ -33,7 +34,13 @@
 const fs = require('fs')
 const path = require('path')
 const { spawnSync } = require('child_process')
-const { readState, writeState, mergeState, normalizeDomainInitSlug } = require('./specflow-state.cjs')
+const { readState, writeState, mergeState, normalizeDomainInitRef } = require('./specflow-state.cjs')
+const {
+  passGate,
+  blockGate,
+  skipGate,
+  fileSnapshot,
+} = require('./gates.cjs')
 const { syncResidualToState } = require('./residual-metrics.cjs')
 const { parseMarkdownTree, findByKey, renderNode } = require('./plan-parser.cjs')
 const {
@@ -41,6 +48,8 @@ const {
   normalizeCodingPatchContent,
   mergeCodingPatches: mergeCodingPatchesShared,
   writeRequirementCodeStyleArtifacts,
+  filterCodingPatchesForCodeStyle,
+  stripAppliesSuffix,
 } = require('./code-style.cjs')
 const { parseDomainMd } = require('./domain-knowledge.cjs')
 
@@ -53,6 +62,7 @@ const ACTIONS = [
   'set-code-style-explored',
   'ack-specify-before-plan',
   'ack-specify-review',
+  'mark-specify-review-blocked',
   'ack-auto-clarifications',
   'set-domain-init-pref',
   'set-domain-init-candidates',
@@ -79,6 +89,13 @@ const VALID_TRANSITIONS = {
 function fail(error) {
   console.log(JSON.stringify({ ok: false, error }))
   process.exit(1)
+}
+
+function ensureGateResult(result) {
+  if (!result || result.ok !== true) {
+    fail(result && result.error ? result.error : '门禁写入失败')
+  }
+  return result
 }
 
 function resolveDir(workspaceRoot, requirementId) {
@@ -124,16 +141,16 @@ function safeReadJson(filePath, fallback) {
   }
 }
 
-function parseDomainSlugList(input) {
+function parseDomainRefList(input) {
   const raw = String(input || '')
   if (!raw.trim()) return []
   const out = []
   const seen = new Set()
   for (const item of raw.split(',')) {
-    const slug = normalizeDomainInitSlug(item)
-    if (!slug || seen.has(slug)) continue
-    seen.add(slug)
-    out.push(slug)
+    const ref = normalizeDomainInitRef(item)
+    if (!ref || seen.has(ref)) continue
+    seen.add(ref)
+    out.push(ref)
   }
   return out
 }
@@ -150,9 +167,13 @@ function extractCodingStandardPatchesFromEvidence(evidence) {
     let m = line.match(/^(?:[-*]\s*)?\[(?:CodeStyle|CodingStyle|代码规范)\]\s*([^:\]]*?)\s*:\s*(.+)$/i)
     if (m) {
       const section = normalizeCodingPatchSection(m[1] || 'general')
-      const content = normalizeCodingPatchContent(m[2])
+      const stripped = stripAppliesSuffix(m[2])
+      const content = normalizeCodingPatchContent(stripped.content)
       if (content) {
-        patches.push({ section, content, extractedAt: new Date().toISOString() })
+        const item = { section, content, extractedAt: new Date().toISOString() }
+        if (stripped.layers) item.layers = stripped.layers
+        if (stripped.applies) item.applies = stripped.applies
+        patches.push(item)
       }
       continue
     }
@@ -171,9 +192,11 @@ function extractCodingStandardPatchesFromEvidence(evidence) {
 }
 
 function appendCodingStandardPatchFromFailure(workspaceRoot, requirementId, evidence, planContent) {
-  const incoming = extractCodingStandardPatchesFromEvidence(evidence)
+  const extracted = extractCodingStandardPatchesFromEvidence(evidence)
+  const filtered = filterCodingPatchesForCodeStyle(workspaceRoot, extracted)
+  const incoming = filtered.accepted
   if (incoming.length === 0) {
-    return { generated: false, count: 0, appended: 0, path: null }
+    return { generated: false, count: 0, appended: 0, path: null, rejectedCount: filtered.rejected.length }
   }
 
   const reqTempDir = path.join(workspaceRoot, 'ai-docs', requirementId, '.temp')
@@ -190,6 +213,7 @@ function appendCodingStandardPatchFromFailure(workspaceRoot, requirementId, evid
   return {
     generated: changed,
     count: incoming.length,
+    rejectedCount: filtered.rejected.length,
     appended: merged.length - (Array.isArray(existing) ? existing.length : 0),
     path: patchPath,
   }
@@ -209,15 +233,8 @@ function ensureCodingStandardPatch(workspaceRoot, requirementId, planContent) {
   }
 }
 
-function normalizeDomainName(raw) {
-  return (
-    String(raw || 'general')
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9\-]/g, '-')
-      .replace(/\-+/g, '-')
-      .replace(/^\-|\-$/g, '') || 'general'
-  )
+function normalizeDomainRefForPatch(raw) {
+  return normalizeDomainInitRef(String(raw || '')) || ''
 }
 
 function parseSourceRequirementIds(cell) {
@@ -263,6 +280,28 @@ function rowToPatch(category, row, domain, requirementId) {
       patch.sourceRequirementId = sourceIds[0] || rid || null
       return patch
     }
+    case 'formula': {
+      const scope = String(row[0] || '').trim()
+      const formula = String(row[1] || '').trim()
+      const boundary = String(row[2] || '').trim()
+      const sourceIds = parseSourceRequirementIds(row[3])
+      if (!scope && !formula && !boundary) return null
+      const patch = { domain, category: 'formula', scope: scope || '通用', content: formula, formula }
+      if (boundary) patch.boundary = boundary
+      patch.sourceRequirementId = sourceIds[0] || rid || null
+      return patch
+    }
+    case 'pitfall': {
+      const scope = String(row[0] || '').trim()
+      const content = String(row[1] || '').trim()
+      const impact = String(row[2] || '').trim()
+      const sourceIds = parseSourceRequirementIds(row[3])
+      if (!scope && !content && !impact) return null
+      const patch = { domain, category: 'pitfall', scope: scope || '通用', content }
+      if (impact) patch.impact = impact
+      patch.sourceRequirementId = sourceIds[0] || rid || null
+      return patch
+    }
     case 'techDebt': {
       const id = String(row[0] || '').trim()
       const content = String(row[1] || '').trim()
@@ -284,7 +323,8 @@ function dedupeKnowledgePatches(existing, incoming) {
   const all = [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(incoming) ? incoming : [])]
   for (const patch of all) {
     if (!patch || typeof patch !== 'object') continue
-    const domain = normalizeDomainName(patch.domain || 'general')
+    const domain = normalizeDomainRefForPatch(patch.domain || patch.domainRef || '')
+    if (!domain) continue
     const category = String(patch.category || 'rule').trim()
     const content = String(patch.content || '').trim()
     const scope = String(patch.scope || '').trim()
@@ -293,7 +333,10 @@ function dedupeKnowledgePatches(existing, incoming) {
     const condition = String(patch.condition || '').trim()
     const to = String(patch.to || '').trim()
     const id = String(patch.id || '').trim()
-    const key = `${domain}::${category}::${term}::${scope}::${from}::${condition}::${to}::${id}::${content}`.toLowerCase()
+    const formula = String(patch.formula || '').trim()
+    const boundary = String(patch.boundary || '').trim()
+    const impact = String(patch.impact || '').trim()
+    const key = `${domain}::${category}::${term}::${scope}::${from}::${condition}::${to}::${id}::${formula}::${boundary}::${impact}::${content}`.toLowerCase()
     if (!map.has(key)) {
       map.set(key, { ...patch, domain })
       continue
@@ -305,6 +348,9 @@ function dedupeKnowledgePatches(existing, incoming) {
     if (!prev.strength && patch.strength) prev.strength = patch.strength
     if (!prev.enum && patch.enum) prev.enum = patch.enum
     if (!prev.owner && patch.owner) prev.owner = patch.owner
+    if (!prev.formula && patch.formula) prev.formula = patch.formula
+    if (!prev.boundary && patch.boundary) prev.boundary = patch.boundary
+    if (!prev.impact && patch.impact) prev.impact = patch.impact
   }
   return Array.from(map.values())
 }
@@ -318,8 +364,9 @@ function buildKnowledgePatchFromBusinessDomains(workspaceRoot, requirementId) {
     const fullPath = path.join(domainDir, file)
     const content = fs.readFileSync(fullPath, 'utf-8')
     const parsed = parseDomainMd(content)
-    const domain = normalizeDomainName(parsed?.frontmatter?.domain || file.replace(/\.md$/i, ''))
-    for (const category of ['entity', 'rule', 'stateMachine', 'techDebt']) {
+    const domain = normalizeDomainRefForPatch(parsed?.frontmatter?.domain || '')
+    if (!domain) continue
+    for (const category of ['entity', 'rule', 'stateMachine', 'formula', 'pitfall', 'techDebt']) {
       const rows = (parsed && parsed.buckets && parsed.buckets[category]) || []
       for (const row of rows) {
         const patch = rowToPatch(category, row, domain, requirementId)
@@ -438,6 +485,12 @@ function main() {
     }
     case 'set-archive-anchor': {
       mergeState(dir, { archiveAnchorDone: true })
+      ensureGateResult(passGate(dir, 'archive.user_anchor', {
+        stage: 'Archive',
+        scope: 'requirement',
+        subject: 'physical archive confirmation',
+        evidence: 'user confirmed archive',
+      }))
       console.log(JSON.stringify({ ok: true }, null, 2))
       break
     }
@@ -445,6 +498,12 @@ function main() {
       const state = readState(dir)
       const { archiveAnchorDone, domainMerged, knowledgeReviewed, ...rest } = state
       writeState(dir, rest)
+      ensureGateResult(blockGate(dir, 'archive.user_anchor', {
+        stage: 'Archive',
+        scope: 'requirement',
+        subject: 'physical archive confirmation',
+        reason: 'archive anchor cleared',
+      }))
       console.log(JSON.stringify({ ok: true }, null, 2))
       break
     }
@@ -496,20 +555,25 @@ function main() {
         fail('set-domain-init-pref 需要参数: --pref scan|skip  或位置参数')
       }
       if (pref === 'scan') {
-        const slugRaw = (named['slug'] || named['domain'] || extras[1] || '').trim()
-        const slugList = parseDomainSlugList(slugRaw)
-        if (slugList.length === 0) {
-          fail('选 scan 时必须提供合法领域标识（支持逗号分隔多个，如 payment,order）')
+        const refRaw = (named['ref'] || named['domain-ref'] || extras[1] || '').trim()
+        const refs = parseDomainRefList(refRaw)
+        if (refs.length === 0) {
+          fail('选 scan 时必须提供合法领域身份（支持逗号分隔多个，如 services/order::payment,apps/admin::payment）')
         }
         mergeState(dir, {
           domainInitChoice: 'scan',
-          domainInitSlug: slugList[0],
-          domainInitSlugs: slugList,
-          domainInitCandidates: undefined,
+          domainInitRefs: refs,
+          domainInitCandidateRefs: undefined,
         })
+        ensureGateResult(passGate(dir, 'init.domain_refs', {
+          stage: 'Init',
+          scope: 'requirement',
+          subject: 'business domain refs',
+          evidence: refs,
+        }))
         console.log(
           JSON.stringify(
-            { ok: true, domainInitChoice: 'scan', domainInitSlug: slugList[0], domainInitSlugs: slugList },
+            { ok: true, domainInitChoice: 'scan', domainInitRefs: refs },
             null,
             2,
           ),
@@ -517,27 +581,32 @@ function main() {
       } else {
         mergeState(dir, {
           domainInitChoice: 'skip',
-          domainInitSlug: undefined,
-          domainInitSlugs: undefined,
-          domainInitCandidates: undefined,
+          domainInitRefs: undefined,
+          domainInitCandidateRefs: undefined,
         })
+        ensureGateResult(skipGate(dir, 'init.domain_refs', {
+          stage: 'Init',
+          scope: 'requirement',
+          subject: 'business domain refs',
+          reason: 'user chose to skip domain initialization',
+        }))
         console.log(JSON.stringify({ ok: true, domainInitChoice: 'skip' }, null, 2))
       }
       break
     }
     case 'set-domain-init-candidates': {
-      const slugRaw = (named['slug'] || named['domain'] || extras[0] || '').trim()
-      const slugList = parseDomainSlugList(slugRaw)
-      if (slugList.length === 0) {
-        fail('set-domain-init-candidates 需要合法领域标识（支持逗号分隔多个，如 content-library,playlist）')
+      const refRaw = (named['ref'] || named['domain-ref'] || extras[0] || '').trim()
+      const refs = parseDomainRefList(refRaw)
+      if (refs.length === 0) {
+        fail('set-domain-init-candidates 需要合法领域身份（支持逗号分隔多个，如 services/order::payment,apps/admin::payment）')
       }
-      mergeState(dir, { domainInitCandidates: slugList })
-      console.log(JSON.stringify({ ok: true, domainInitCandidates: slugList }, null, 2))
+      mergeState(dir, { domainInitCandidateRefs: refs })
+      console.log(JSON.stringify({ ok: true, domainInitCandidateRefs: refs }, null, 2))
       break
     }
     case 'clear-domain-init-candidates': {
-      mergeState(dir, { domainInitCandidates: undefined })
-      console.log(JSON.stringify({ ok: true, domainInitCandidates: [] }, null, 2))
+      mergeState(dir, { domainInitCandidateRefs: undefined })
+      console.log(JSON.stringify({ ok: true, domainInitCandidateRefs: [] }, null, 2))
       break
     }
     case 'ack-specify-before-plan': {
@@ -551,7 +620,22 @@ function main() {
       } catch (e) {
         fail(`无法读取 specify.md 时间戳: ${e.message || e}`)
       }
-      mergeState(dir, { ackSpecifyBeforePlan: true, specifyAckMtime: mtimeMs })
+      // Plan confirmation only authorizes generating plan.md. It must not carry
+      // over any previous Implement/Group authorization into the newly generated roadmap.
+      mergeState(dir, {
+        ackSpecifyBeforePlan: true,
+        specifyAckMtime: mtimeMs,
+        activeGroup: undefined,
+        autoProceedGroups: false,
+        groupRetryCount: 0,
+      })
+      ensureGateResult(passGate(dir, 'plan.user_confirm_start', {
+        stage: 'PlanReadiness',
+        scope: 'requirement',
+        subject: 'user confirmed start plan',
+        snapshot: fileSnapshot(workspaceRoot, path.join('ai-docs', requirementId, 'specify.md')),
+        evidence: 'user confirmed start plan',
+      }))
       console.log(JSON.stringify({ ok: true, specifyAckMtime: mtimeMs }, null, 2))
       break
     }
@@ -566,8 +650,89 @@ function main() {
       } catch (e) {
         fail(`无法读取 specify.md 时间戳: ${e.message || e}`)
       }
-      mergeState(dir, { specifyReviewPassedMtime: mtimeMs })
-      console.log(JSON.stringify({ ok: true, specifyReviewPassedMtime: mtimeMs }, null, 2))
+      const evidenceRaw = (named['contract-evidence'] || named.evidence || extras[0] || 'confirmed').trim()
+      const allowedEvidence = new Set(['confirmed', 'mock_allowed', 'not_required'])
+      const contractEvidence = allowedEvidence.has(evidenceRaw) ? evidenceRaw : 'confirmed'
+      mergeState(dir, {
+        specifyReviewStatus: 'ready',
+        specifyReviewMtime: mtimeMs,
+        specifyReviewPassedMtime: mtimeMs,
+        specifyReviewContractEvidence: contractEvidence,
+        specifyReviewBlockReason: undefined,
+      })
+      const specifySnapshot = fileSnapshot(workspaceRoot, path.join('ai-docs', requirementId, 'specify.md'))
+      ensureGateResult(passGate(dir, 'plan.readiness_review', {
+        stage: 'PlanReadiness',
+        scope: 'requirement',
+        subject: 'specify to plan readiness',
+        snapshot: specifySnapshot,
+        evidence: contractEvidence,
+      }))
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            specifyReviewStatus: 'ready',
+            specifyReviewMtime: mtimeMs,
+            specifyReviewPassedMtime: mtimeMs,
+            specifyReviewContractEvidence: contractEvidence,
+          },
+          null,
+          2,
+        ),
+      )
+      break
+    }
+    case 'mark-specify-review-blocked': {
+      const specifyPath = path.join(dir, 'specify.md')
+      if (!fs.existsSync(specifyPath)) {
+        fail('specify.md 不存在，无法记录架构评审阻塞')
+      }
+      let mtimeMs = 0
+      try {
+        mtimeMs = fs.statSync(specifyPath).mtimeMs
+      } catch (e) {
+        fail(`无法读取 specify.md 时间戳: ${e.message || e}`)
+      }
+      const reason = (named.reason || extras[0] || '存在技术方案制定阻塞，需先完成技术澄清').trim()
+      mergeState(dir, {
+        specifyReviewStatus: 'blocked',
+        specifyReviewMtime: mtimeMs,
+        specifyReviewContractEvidence: 'missing',
+        specifyReviewBlockReason: reason,
+        specifyReviewPassedMtime: undefined,
+        ackSpecifyBeforePlan: undefined,
+        specifyAckMtime: undefined,
+      })
+      const specifySnapshot = fileSnapshot(workspaceRoot, path.join('ai-docs', requirementId, 'specify.md'))
+      ensureGateResult(blockGate(dir, 'plan.readiness_review', {
+        stage: 'PlanReadiness',
+        scope: 'requirement',
+        subject: 'specify to plan readiness',
+        snapshot: specifySnapshot,
+        reason,
+        evidence: 'missing',
+      }))
+      ensureGateResult(blockGate(dir, 'plan.user_confirm_start', {
+        stage: 'PlanReadiness',
+        scope: 'requirement',
+        subject: 'user confirmed start plan',
+        snapshot: specifySnapshot,
+        reason: 'readiness review blocked',
+      }))
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            specifyReviewStatus: 'blocked',
+            specifyReviewMtime: mtimeMs,
+            specifyReviewContractEvidence: 'missing',
+            specifyReviewBlockReason: reason,
+          },
+          null,
+          2,
+        ),
+      )
       break
     }
     case 'ack-auto-clarifications': {

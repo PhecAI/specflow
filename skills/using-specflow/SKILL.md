@@ -92,7 +92,7 @@ flowchart TB
 - **MUST（Token Efficiency）** 仅在以下场景允许读脚本源码：首次接入且参数契约未知；命令报错需排障；用户明确指出规则/契约已变更且要求核对行为
 - **MUST（Token Efficiency）** 必要读取时采用最小范围读取（targeted ranges），禁止默认整文件读取大脚本；同一任务中避免重复读取同一脚本
 - **STRICTLY PROHIBITED** Implement 阶段在未 `sync-document` 的情况下改合约/接口/外部行为（先 `syncing-specflow-docs`）
-- **STRICTLY PROHIBITED** 跳过**阻塞性**澄清闭环：Clarification Log 中未闭合的阻塞性 `[?]` 必须闭合后方可进入 Plan（无阻塞性 `[?]` 时无需提问）
+- **STRICTLY PROHIBITED** 跳过待产品确认闭环：Clarification Log 中未闭合的 `[?]`（包括必须询问与建议确认）必须闭合后方可进入 Plan。
 
 ---
 

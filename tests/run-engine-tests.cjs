@@ -28,7 +28,6 @@ const {
   specifyIncompleteDomainCQClosed,
   planWithRoadmap,
   planAllCompleted,
-  appendPlanDecisionSummary,
   planWithBlockedTag,
   planEmptyGroup,
   writeWorkspace,
@@ -46,6 +45,45 @@ const MERGE_GLOBAL_ASSETS = path.join(
   'merge-global-assets.cjs'
 );
 const INVENTORY_SCAN = path.join(__dirname, '..', 'tools', 'inventory-scan.cjs');
+const {
+  passGate,
+  blockGate,
+  readGates,
+  validateGate,
+  GATE_DEFINITIONS,
+} = require(path.join(__dirname, '..', 'tools', 'gates.cjs'));
+
+function writeCalibratedArchitectureLayers(ws, requirementId) {
+  const reqDir = path.join(ws, 'ai-docs', requirementId);
+  const standardsDir = path.join(ws, 'ai-docs', 'global-assets', 'standards');
+  fs.mkdirSync(reqDir, { recursive: true });
+  fs.mkdirSync(standardsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(standardsDir, 'architecture-layers.md'),
+    [
+      '# Architecture Layers',
+      '',
+      '## Layers',
+      '',
+      '### `ui-page`',
+      '',
+      '- globs:',
+      '  - `src/pages/**/*.vue`',
+      '- role: 页面层',
+      '- should:',
+      '  - 编排页面状态',
+      '- should_not:',
+      '  - 不承载跨页面复用逻辑',
+      '- evidence:',
+      '  - `src/pages/example.vue`',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  passGate(reqDir, 'init.architecture_layers', {
+    evidence: 'test calibrated architecture layers',
+  });
+}
 
 describe('specflow-engine.cjs', () => {
   it('无需求号且无 Git、无 ai-docs → interaction_required（仅 init_requirement_text）', () => {
@@ -111,6 +149,7 @@ describe('specflow-engine.cjs', () => {
 
   it('领域初始化两阶段 prompt 驱动：S1 text 题 → S2 N 道 yes/no → dispatch_array 派发多 domain → specify', () => {
     const ws = mkWorkspace();
+    writeCalibratedArchitectureLayers(ws, 'new-user-req');
 
     // S1：首轮引擎 → text 题，要求 agent 提交候选
     let r = runEngine(ws, 'new-user-req');
@@ -126,11 +165,11 @@ describe('specflow-engine.cjs', () => {
     assert.ok(j.suggestedAction.init_context, 'init_context 必须提供需求摘要与已有全局领域');
     assert.ok(Array.isArray(j.suggestedAction.init_context.existingGlobalDomains));
 
-    // agent 提交候选 pay,order（两个都不在全局）
-    let ms = runManageState(ws, 'new-user-req', 'set-domain-init-candidates', ['pay,order']);
+    // agent 提交候选 services/pay::payment,services/order::order（两个都不在全局）
+    let ms = runManageState(ws, 'new-user-req', 'set-domain-init-candidates', ['services/pay::payment,services/order::order']);
     assert.strictEqual(ms.status, 0, ms.stderr);
     const msj = JSON.parse(ms.stdout);
-    assert.deepStrictEqual(msj.domainInitCandidates, ['pay', 'order']);
+    assert.deepStrictEqual(msj.domainInitCandidateRefs, ['services/pay::payment', 'services/order::order']);
 
     // S2：第二轮引擎 → N 道 yes/no 采纳题
     r = runEngine(ws, 'new-user-req');
@@ -138,13 +177,13 @@ describe('specflow-engine.cjs', () => {
     assert.strictEqual(j.suggestedAction.type, 'interaction_required');
     qs = j.suggestedAction.questions || [];
     assert.strictEqual(qs.length, 2);
-    assert.strictEqual(qs[0].id, 'domain_init_accept__pay');
-    assert.strictEqual(qs[1].id, 'domain_init_accept__order');
-    assert.deepStrictEqual(j.suggestedAction.init_context.needConfirm, ['pay', 'order']);
+    assert.strictEqual(qs[0].id, 'domain_init_accept__services__pay__payment');
+    assert.strictEqual(qs[1].id, 'domain_init_accept__services__order__order');
+    assert.deepStrictEqual(j.suggestedAction.init_context.needConfirm, ['services/pay::payment', 'services/order::order']);
     assert.deepStrictEqual(j.suggestedAction.init_context.autoAcceptFromGlobal, []);
 
     // agent 汇总 yes/no 结果，把全部 accepted 写入 confirmed
-    ms = runManageState(ws, 'new-user-req', 'set-domain-init-pref', ['scan', 'pay,order']);
+    ms = runManageState(ws, 'new-user-req', 'set-domain-init-pref', ['scan', 'services/pay::payment,services/order::order']);
     assert.strictEqual(ms.status, 0, ms.stderr);
 
     // 第三轮：两个都缺本地文档 → dispatch_array 并行派发
@@ -156,8 +195,8 @@ describe('specflow-engine.cjs', () => {
     assert.ok(j.suggestedAction.items.map((x) => x.groupId).every((g) => /^domain-init:/.test(g)));
     assert.strictEqual(j.suggestedAction.waitPolicy, 'all');
 
-    writeBusinessDomain(ws, 'new-user-req', 'pay', '# Pay\n');
-    writeBusinessDomain(ws, 'new-user-req', 'order', '# Order\n');
+    writeBusinessDomain(ws, 'new-user-req', 'services/pay::payment', '# Pay\n');
+    writeBusinessDomain(ws, 'new-user-req', 'services/order::order', '# Order\n');
 
     // 两个 domain 就绪 → specify
     r = runEngine(ws, 'new-user-req');
@@ -167,14 +206,33 @@ describe('specflow-engine.cjs', () => {
     assert.strictEqual(j.userFacing.templateId, 'orchestration.dispatch');
   });
 
+  it('Init：创建需求目录时会幂等初始化全局资产与 architecture-layers 门禁', () => {
+    const ws = mkWorkspace();
+    const r = runEngine(ws, 'init-gates-req');
+    assert.strictEqual(r.status, 0, r.stderr);
+    const layersPath = path.join(ws, 'ai-docs', 'global-assets', 'standards', 'architecture-layers.md');
+    const codeStylePath = path.join(ws, 'ai-docs', 'global-assets', 'standards', 'code-style.md');
+    const gatesPath = path.join(ws, 'ai-docs', 'init-gates-req', '.temp', 'gates.json');
+    assert.ok(fs.existsSync(layersPath), 'architecture-layers.md 应在 Init 阶段创建骨架');
+    assert.ok(fs.existsSync(codeStylePath), 'code-style.md 应在 Init 阶段创建骨架');
+    const gates = JSON.parse(fs.readFileSync(gatesPath, 'utf8'));
+    assert.strictEqual(gates.gates['init.global_assets'].status, 'passed');
+    assert.strictEqual(gates.gates['init.architecture_layers'].status, 'pending');
+    const j = parseEngineJson(r.stdout);
+    assert.strictEqual(j.phase, 'Init');
+    assert.strictEqual(j.suggestedAction.type, 'dispatch');
+    assert.strictEqual(j.suggestedAction.agent, 'specflow-architecture-layers');
+  });
+
   it('dispatch_array 上限 5：候选 7 个时本轮只派前 5 个，note 标注剩余', () => {
     const ws = mkWorkspace();
+    writeCalibratedArchitectureLayers(ws, 'big-req');
     runEngine(ws, 'big-req'); // S1 初始化 ai-docs 目录
-    const slugs = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7'];
-    let ms = runManageState(ws, 'big-req', 'set-domain-init-candidates', [slugs.join(',')]);
+    const refs = ['svc/a::a1', 'svc/b::b2', 'svc/c::c3', 'svc/d::d4', 'svc/e::e5', 'svc/f::f6', 'svc/g::g7'];
+    let ms = runManageState(ws, 'big-req', 'set-domain-init-candidates', [refs.join(',')]);
     assert.strictEqual(ms.status, 0, ms.stderr);
     // 跳过 yes/no，直接把全部提升为 confirmed（模拟 agent 汇总结果）
-    ms = runManageState(ws, 'big-req', 'set-domain-init-pref', ['scan', slugs.join(',')]);
+    ms = runManageState(ws, 'big-req', 'set-domain-init-pref', ['scan', refs.join(',')]);
     assert.strictEqual(ms.status, 0, ms.stderr);
     const r = runEngine(ws, 'big-req');
     const j = parseEngineJson(r.stdout);
@@ -185,15 +243,16 @@ describe('specflow-engine.cjs', () => {
 
   it('候选全部在全局领域：S2 仅 1 道确认题（domain_init_all_from_global_ack）', () => {
     const ws = mkWorkspace();
+    writeCalibratedArchitectureLayers(ws, 'payment-feature');
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'domains'), { recursive: true });
     fs.writeFileSync(
-      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'),
+      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'),
       '# payment\n规则',
       'utf8',
     );
 
     runEngine(ws, 'payment-feature');
-    const ms = runManageState(ws, 'payment-feature', 'set-domain-init-candidates', ['payment']);
+    const ms = runManageState(ws, 'payment-feature', 'set-domain-init-candidates', ['services/order::payment']);
     assert.strictEqual(ms.status, 0, ms.stderr);
 
     const r = runEngine(ws, 'payment-feature');
@@ -202,7 +261,7 @@ describe('specflow-engine.cjs', () => {
     const qs = j.suggestedAction.questions || [];
     assert.strictEqual(qs.length, 1);
     assert.strictEqual(qs[0].id, 'domain_init_all_from_global_ack');
-    assert.deepStrictEqual(j.suggestedAction.init_context.autoAcceptFromGlobal, ['payment']);
+    assert.deepStrictEqual(j.suggestedAction.init_context.autoAcceptFromGlobal, ['services/order::payment']);
     assert.deepStrictEqual(j.suggestedAction.init_context.needConfirm, []);
   });
 
@@ -251,6 +310,115 @@ describe('specflow-engine.cjs', () => {
     assert.ok(j.suggestedAction.questions.length > 0);
   });
 
+  it('Specify：正文散落内联 [?] → block，禁止进入 Plan', () => {
+    const ws = mkWorkspace();
+    const specify = specifyComplete().replace(
+      '- Done.',
+      '- Done. [?] 该验收口径仍需确认。'
+    );
+    writeWorkspace(ws, 'R1', { specify });
+    const j = parseEngineJson(runEngine(ws, 'R1').stdout);
+    assert.strictEqual(j.phase, 'Specify');
+    assert.strictEqual(j.suggestedAction.type, 'block');
+    assert.match(j.suggestedAction.reason, /内联 \[\?\]/);
+  });
+
+  it('Specify：.temp/clarifications.json 未闭合 → interaction_required', () => {
+    const ws = mkWorkspace();
+    writeWorkspace(ws, 'R1', { specify: specifyDraftMinimal() });
+    const tempDir = path.join(ws, 'ai-docs', 'R1', '.temp');
+    fs.mkdirSync(tempDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, 'clarifications.json'),
+      JSON.stringify({
+        product: [
+          {
+            id: 'CQ-Product-01',
+            question: '是否纳入历史数据？',
+            whyCritical: '影响验收样本。',
+            recommendation: '推荐不纳入。',
+            options: ['不纳入历史数据', '纳入历史数据'],
+          },
+        ],
+      }),
+      'utf8'
+    );
+    const j = parseEngineJson(runEngine(ws, 'R1').stdout);
+    assert.strictEqual(j.suggestedAction.type, 'interaction_required');
+    assert.strictEqual(j.suggestedAction.questions[0].id, 'CQ-Product-01');
+    assert.match(j.suggestedAction.questions[0].prompt, /是否纳入历史数据/);
+  });
+
+  it('Specify：新格式澄清会生成业务决策题 prompt', () => {
+    const ws = mkWorkspace();
+    const specify = specifyComplete(`
+### [?] CQ-01: 是否纳入历史数据回填
+> **需要你决定**: 本次上线后，历史订单是否也要展示新的状态标签？
+> **为什么关键**: 这会影响验收范围、数据处理方式和 QA 样本。
+> **SpecFlow 建议**: 推荐仅覆盖新订单，以降低上线风险。
+
+- **Option A (推荐)**: 仅新产生的订单展示新状态。
+  - 适合: 快速上线，风险较低。
+  - 代价: 历史订单体验不完全一致。
+- **Option B**: 新旧订单全部展示新状态。
+  - 适合: 强一致体验。
+  - 代价: 需要确认历史数据映射规则。
+
+#### **[User]**:
+`);
+    writeWorkspace(ws, 'R1', { specify });
+    const j = parseEngineJson(runEngine(ws, 'R1').stdout);
+    assert.strictEqual(j.suggestedAction.type, 'interaction_required');
+    const q = j.suggestedAction.questions[0];
+    assert.match(q.prompt, /需要你决定：本次上线后/);
+    assert.match(q.prompt, /为什么关键：这会影响验收范围/);
+    assert.match(q.prompt, /SpecFlow 建议：推荐仅覆盖新订单/);
+    assert.ok(q.options.some((o) => String(o.label).includes('仅新产生的订单展示新状态')));
+  });
+
+  it('Specify：建议确认会生成确认式 prompt', () => {
+    const ws = mkWorkspace();
+    const specify = specifyComplete(`
+### [?] CQ-Confirm-01: 上传后默认审核状态
+> **需要你确认**: 素材上传后默认进入「待审核」，审核通过后才可被业务使用。
+> **为什么关键**: 这会影响状态流转、验收样本和免审规则。
+> **SpecFlow 建议**: 现有素材流程以审核后发布为主，默认待审核风险更低。
+
+- **Option A (推荐)**: 按 SpecFlow 建议处理。
+- **Option B**: 不采用，请按补充说明调整。
+
+#### **[User]**:
+`);
+    writeWorkspace(ws, 'R1', { specify });
+    const j = parseEngineJson(runEngine(ws, 'R1').stdout);
+    assert.strictEqual(j.suggestedAction.type, 'interaction_required');
+    const q = j.suggestedAction.questions[0];
+    assert.match(q.prompt, /需要你确认：素材上传后默认进入/);
+    assert.match(q.prompt, /为什么关键：这会影响状态流转/);
+    assert.match(q.prompt, /SpecFlow 建议：现有素材流程/);
+    assert.ok(q.options.some((o) => String(o.label).includes('按 SpecFlow 建议处理')));
+  });
+
+  it('Specify：超过 3 条未闭合澄清也一次性返回', () => {
+    const ws = mkWorkspace();
+    const cq = (n) => `
+### [?] CQ-0${n}: 决策 ${n}
+> **需要你决定**: 是否采用方案 ${n}？
+> **为什么关键**: 影响 AC-${n} 的验收口径。
+> **SpecFlow 建议**: 推荐 Option A。
+
+- **Option A (推荐)**: 采用默认方案 ${n}。
+- **Option B**: 采用备选方案 ${n}。
+
+#### **[User]**:
+`;
+    writeWorkspace(ws, 'R1', { specify: specifyComplete([1, 2, 3, 4].map(cq).join('\n')) });
+    const j = parseEngineJson(runEngine(ws, 'R1').stdout);
+    assert.strictEqual(j.suggestedAction.type, 'interaction_required');
+    assert.strictEqual(j.suggestedAction.questions.length, 4);
+    assert.ok(!String(j.suggestedAction.reason).includes('每轮最多'));
+  });
+
   it('Specify：草稿 → 默认派发 specflow-specify', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', { specify: specifyDraftMinimal() });
@@ -284,7 +452,7 @@ describe('specflow-engine.cjs', () => {
       specify: specifyCompleteWithBlockerGate(),
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
-    assert.strictEqual(j.phase, 'Plan');
+    assert.strictEqual(j.phase, 'PlanReadiness');
     assert.strictEqual(j.suggestedAction.type, 'block');
     assert.ok(String(j.suggestedAction.reason).includes('规格'));
   });
@@ -296,7 +464,7 @@ describe('specflow-engine.cjs', () => {
       state: { stateVersion: 1, ackSpecifyBeforePlan: false },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
-    assert.strictEqual(j.phase, 'Plan');
+    assert.strictEqual(j.phase, 'PlanReadiness');
     assert.strictEqual(j.suggestedAction.type, 'dispatch');
     assert.strictEqual(j.suggestedAction.agent, 'specflow-specify-review');
   });
@@ -309,16 +477,92 @@ describe('specflow-engine.cjs', () => {
     });
     const ackR = runManageState(ws, 'R1', 'ack-specify-review');
     assert.strictEqual(ackR.status, 0, ackR.stderr);
-    const ackCs = runManageState(ws, 'R1', 'set-code-style-explored');
-    assert.strictEqual(ackCs.status, 0, ackCs.stderr);
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
-    assert.strictEqual(j.phase, 'Plan');
+    assert.strictEqual(j.phase, 'PlanReadiness');
     assert.strictEqual(j.suggestedAction.type, 'interaction_required');
     const q = j.suggestedAction.questions.find((x) => x.id === 'confirm_start_plan');
     assert.ok(q);
+    assert.match(q.prompt, /需求说明已就绪，技术前置问题也已处理完/);
+    assert.strictEqual(
+      q.prompt,
+      '需求说明已就绪，技术前置问题也已处理完。\n\n是否开始生成**技术方案**？',
+    );
+    assert.strictEqual(j.userFacing.templateId, 'orchestration.plan_confirm');
+    assert.match(j.userFacing.fallbackMessage, /需求说明已就绪，技术前置问题也已处理完/);
   });
 
-  it('Plan：架构评审通过但代码规范未评估 → dispatch specflow-code-style-explorer', () => {
+  it('Plan：确认生成 plan 会清理旧 Group 授权，生成 plan 后仍需选择执行方式', () => {
+    const ws = mkWorkspace();
+    writeWorkspace(ws, 'R1', {
+      specify: specifyComplete(),
+      state: {
+        stateVersion: 1,
+        activeGroup: 'Group A',
+        autoProceedGroups: true,
+        groupRetryCount: 2,
+      },
+    });
+
+    const reviewR = runManageState(ws, 'R1', 'ack-specify-review');
+    assert.strictEqual(reviewR.status, 0, reviewR.stderr);
+    const ackR = runManageState(ws, 'R1', 'ack-specify-before-plan');
+    assert.strictEqual(ackR.status, 0, ackR.stderr);
+
+    let st = readState(path.join(ws, 'ai-docs', 'R1'));
+    assert.strictEqual(st.activeGroup, undefined);
+    assert.strictEqual(st.autoProceedGroups, false);
+    assert.strictEqual(st.groupRetryCount, 0);
+
+    fs.writeFileSync(
+      path.join(ws, 'ai-docs', 'R1', 'plan.md'),
+      planWithRoadmap('- [ ] T1 | F-01 |'),
+      'utf8',
+    );
+
+    const j = parseEngineJson(runEngine(ws, 'R1').stdout);
+    assert.strictEqual(j.phase, 'Implement');
+    assert.strictEqual(j.suggestedAction.type, 'interaction_required');
+    assert.ok(j.suggestedAction.questions.some((x) => x.id === 'confirm_start_group'));
+  });
+
+  it('Plan：技术前置评审 blocked 且未生成澄清题 → block，不进入 Plan', () => {
+    const ws = mkWorkspace();
+    writeWorkspace(ws, 'R1', {
+      specify: specifyComplete(),
+      state: { stateVersion: 1, ackSpecifyBeforePlan: false },
+    });
+    const r = runManageState(ws, 'R1', 'mark-specify-review-blocked', ['接口字段未确认']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const gates = readGates(path.join(ws, 'ai-docs', 'R1'));
+    assert.strictEqual(gates.gates['plan.readiness_review'].status, 'blocked');
+    assert.strictEqual(gates.gates['plan.user_confirm_start'].status, 'blocked');
+    assert.ok(gates.gates['plan.user_confirm_start'].snapshot);
+    const j = parseEngineJson(runEngine(ws, 'R1').stdout);
+    assert.strictEqual(j.phase, 'PlanReadiness');
+    assert.strictEqual(j.suggestedAction.type, 'block');
+    assert.match(j.suggestedAction.reason, /技术方案前置评审仍为阻塞状态/);
+  });
+
+  it('Plan：非阻塞区存在 CQ-Contract 技术债务 → 重新派发评审，不允许确认 Plan', () => {
+    const ws = mkWorkspace();
+    writeWorkspace(ws, 'R1', {
+      specify: specifyComplete(`
+### Notes (非阻塞说明)
+- 素材域 API 前缀与各 endpoint（CQ-Contract-01）需在 plan.md 中显式标注 Mock 边界。
+`),
+      state: { stateVersion: 1, ackSpecifyBeforePlan: false },
+    });
+    const ackR = runManageState(ws, 'R1', 'ack-specify-review');
+    assert.strictEqual(ackR.status, 0, ackR.stderr);
+    const j = parseEngineJson(runEngine(ws, 'R1').stdout);
+    assert.strictEqual(j.phase, 'PlanReadiness');
+    assert.strictEqual(j.suggestedAction.type, 'dispatch');
+    assert.strictEqual(j.suggestedAction.agent, 'specflow-specify-review');
+    assert.match(j.suggestedAction.context, /不得作为 Notes、Plan 内待办或非阻塞项/);
+    assert.strictEqual(j.gates.technicalClarificationDebtCount, 1);
+  });
+
+  it('Plan：架构评审通过后不再等待需求级 code-style，直接进入 Plan 确认', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
@@ -326,13 +570,16 @@ describe('specflow-engine.cjs', () => {
     });
     const ackR = runManageState(ws, 'R1', 'ack-specify-review');
     assert.strictEqual(ackR.status, 0, ackR.stderr);
+    const gates = JSON.parse(fs.readFileSync(path.join(ws, 'ai-docs', 'R1', '.temp', 'gates.json'), 'utf8'));
+    assert.strictEqual(gates.gates['plan.readiness_review'].status, 'passed');
+    assert.strictEqual(gates.gates['plan.readiness_review'].evidence[0], 'confirmed');
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
-    assert.strictEqual(j.phase, 'Plan');
-    assert.strictEqual(j.suggestedAction.type, 'dispatch');
-    assert.strictEqual(j.suggestedAction.agent, 'specflow-code-style-explorer');
+    assert.strictEqual(j.phase, 'PlanReadiness');
+    assert.strictEqual(j.suggestedAction.type, 'interaction_required');
+    assert.ok(j.suggestedAction.questions.some((x) => x.id === 'confirm_start_plan'));
   });
 
-  it('Plan：specify 变更后 codeStyleExplored 失效 → 重新 dispatch explorer', () => {
+  it('Plan：specify 变更后只需重新确认进入 Plan，不触发 code-style explorer 门禁', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
@@ -340,20 +587,18 @@ describe('specflow-engine.cjs', () => {
     });
     let r1 = runManageState(ws, 'R1', 'ack-specify-review');
     assert.strictEqual(r1.status, 0, r1.stderr);
-    let r2 = runManageState(ws, 'R1', 'set-code-style-explored');
-    assert.strictEqual(r2.status, 0, r2.stderr);
     const specifyPath = path.join(ws, 'ai-docs', 'R1', 'specify.md');
     const future = new Date(Date.now() + 60_000);
     fs.utimesSync(specifyPath, future, future);
     const ackR2 = runManageState(ws, 'R1', 'ack-specify-review');
     assert.strictEqual(ackR2.status, 0, ackR2.stderr);
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
-    assert.strictEqual(j.phase, 'Plan');
-    assert.strictEqual(j.suggestedAction.type, 'dispatch');
-    assert.strictEqual(j.suggestedAction.agent, 'specflow-code-style-explorer');
+    assert.strictEqual(j.phase, 'PlanReadiness');
+    assert.strictEqual(j.suggestedAction.type, 'interaction_required');
+    assert.ok(j.suggestedAction.questions.some((x) => x.id === 'confirm_start_plan'));
   });
 
-  it('Plan：无 plan.md 时也会预热生成需求级 code-style 参考文件', () => {
+  it('Plan：无 plan.md 时不生成需求级 code-style，避免复制全局规范', () => {
     const ws = mkWorkspace();
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'standards'), { recursive: true });
     fs.writeFileSync(
@@ -371,15 +616,8 @@ describe('specflow-engine.cjs', () => {
 
     const reqCodeStylePath = path.join(ws, 'ai-docs', 'R1', 'code-style.md');
     const reqPatchPath = path.join(ws, 'ai-docs', 'R1', '.temp', 'coding-standard-patch.json');
-    assert.ok(fs.existsSync(reqCodeStylePath));
-    assert.ok(fs.existsSync(reqPatchPath));
-
-    const reqCodeStyle = fs.readFileSync(reqCodeStylePath, 'utf8');
-    assert.ok(reqCodeStyle.includes('[naming] 使用语义化命名'));
-
-    const patch = JSON.parse(fs.readFileSync(reqPatchPath, 'utf8'));
-    assert.ok(Array.isArray(patch));
-    assert.strictEqual(patch.length, 0);
+    assert.ok(!fs.existsSync(reqCodeStylePath));
+    assert.ok(!fs.existsSync(reqPatchPath));
   });
 
   it('Plan：已确认且无 plan → 派发 specflow-plan', () => {
@@ -390,8 +628,6 @@ describe('specflow-engine.cjs', () => {
         stateVersion: 1,
         ackSpecifyBeforePlan: true,
         specifyAckMtime: Number.MAX_SAFE_INTEGER,
-        codeStyleExplored: true,
-        codeStyleExploredMtime: Number.MAX_SAFE_INTEGER,
       },
     });
     const specifyPath = path.join(ws, 'ai-docs', 'R1', 'specify.md');
@@ -407,7 +643,7 @@ describe('specflow-engine.cjs', () => {
 
   it('Implement：plan 正文 [BLOCKER] → block', () => {
     const ws = mkWorkspace();
-    let planMd = appendPlanDecisionSummary(planWithRoadmap());
+    let planMd = planWithRoadmap();
     planMd = planMd.replace('Arch.', 'Arch [BLOCKER] block.');
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
@@ -423,7 +659,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithBlockedTag()),
+      plan: planWithBlockedTag(),
       state: { stateVersion: 1, activeGroup: 'Group A' },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -435,7 +671,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planEmptyGroup()),
+      plan: planEmptyGroup(),
       state: { stateVersion: 1 },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -448,7 +684,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [ ] T1 | F-01 |')),
+      plan: planWithRoadmap('- [ ] T1 | F-01 |'),
       state: { stateVersion: 1, activeGroup: 'Group B' },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -457,11 +693,43 @@ describe('specflow-engine.cjs', () => {
     assert.ok(q);
   });
 
+  it('Implement：返回 confirm_start_group 时会清理过期 pending-protocol，防止旧 Group 协议被派发', () => {
+    const ws = mkWorkspace();
+    writeWorkspace(ws, 'R1', {
+      specify: specifyComplete(),
+      plan: planWithRoadmap('- [ ] T1 | F-01 |'),
+      state: { stateVersion: 1 },
+    });
+    const tempDir = path.join(ws, 'ai-docs', 'R1', '.temp');
+    fs.mkdirSync(tempDir, { recursive: true });
+    const protocolPath = path.join(tempDir, 'pending-protocol.json');
+    fs.writeFileSync(
+      protocolPath,
+      JSON.stringify(
+        {
+          requirementId: 'R1',
+          phase: 'Implement',
+          agent: 'specflow-implement',
+          groupId: 'Group A',
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+
+    const j = parseEngineJson(runEngine(ws, 'R1').stdout);
+    assert.strictEqual(j.phase, 'Implement');
+    assert.strictEqual(j.suggestedAction.type, 'interaction_required');
+    assert.ok(j.suggestedAction.questions.some((x) => x.id === 'confirm_start_group'));
+    assert.strictEqual(fs.existsSync(protocolPath), false);
+  });
+
   it('Implement：autoProceedGroups 自动对齐 activeGroup → 派发 implement', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [ ] T1 | F-01 |')),
+      plan: planWithRoadmap('- [ ] T1 | F-01 |'),
       state: { stateVersion: 1, activeGroup: 'Group B', autoProceedGroups: true },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -476,7 +744,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [!] Fail | F-01 |')),
+      plan: planWithRoadmap('- [!] Fail | F-01 |'),
       state: { stateVersion: 1, activeGroup: 'Group A', groupRetryCount: 4 },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -488,7 +756,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [!] Fail | F-01 |')),
+      plan: planWithRoadmap('- [!] Fail | F-01 |'),
       state: { stateVersion: 1, activeGroup: 'Group A', groupRetryCount: 0 },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -501,7 +769,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [?] QA | F-01 |')),
+      plan: planWithRoadmap('- [?] QA | F-01 |'),
       state: { stateVersion: 1, activeGroup: 'Group A' },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -516,7 +784,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(
+      plan: 
         planWithRoadmap(
           [
             '- [?] **T-A1** | QA | F-01 |',
@@ -525,7 +793,7 @@ describe('specflow-engine.cjs', () => {
             '- [ ] **T-B1** | 待开发 | F-02',
           ].join('\n')
         )
-      ),
+      ,
       state: { stateVersion: 1, activeGroup: 'Group A' },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -539,12 +807,12 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(
+      plan: 
         planWithRoadmap(
           '- [ ] **T-A1** | Code A | F-01 |',
           '\n### Group B: B\n- [!] **T-B1** | Fix B | F-02 |'
         )
-      ),
+      ,
       state: { stateVersion: 1, activeGroup: 'Group A' },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -557,7 +825,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [ ] Code | F-01 |')),
+      plan: planWithRoadmap('- [ ] Code | F-01 |'),
       state: { stateVersion: 1, activeGroup: 'Group A' },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -568,9 +836,9 @@ describe('specflow-engine.cjs', () => {
 
   it('Implement：autoProceed=true 下连续 mark-task（含 plan.md mtime 前进）不清授权、不弹 confirm_start_group', () => {
     const ws = mkWorkspace();
-    const plan = appendPlanDecisionSummary(
+    const plan = 
       planWithRoadmap('- [ ] **T-A1** | 任务1 | F-01 |\n- [ ] **T-A2** | 任务2 | F-01 |')
-    );
+    ;
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
       plan,
@@ -609,7 +877,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [ ] T1 | F-01 |')),
+      plan: planWithRoadmap('- [ ] T1 | F-01 |'),
       state: { stateVersion: 1 },
     });
     const j1 = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -630,7 +898,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [ ] T1 | F-01 |')),
+      plan: planWithRoadmap('- [ ] T1 | F-01 |'),
       state: { stateVersion: 1, activeGroup: 'Group A', autoProceedGroups: true },
     });
     const r = runManageState(ws, 'R1', 'set-active-group', ['Group A']);
@@ -643,7 +911,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: false, knowledgeReviewed: false },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -657,7 +925,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: false, knowledgeReviewed: false },
     });
     // 首跑：anchor 提示
@@ -680,7 +948,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, archiveAnchorDone: true, domainMerged: false },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -694,7 +962,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, archiveAnchorDone: true, domainMerged: true, knowledgeReviewed: false },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -707,7 +975,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: true, knowledgeReviewed: true, archiveAnchorDone: true },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -722,7 +990,7 @@ describe('specflow-engine.cjs', () => {
       'H1',
       {
         specify: specifyComplete(),
-        plan: appendPlanDecisionSummary(planAllCompleted()),
+        plan: planAllCompleted(),
         state: { stateVersion: 1, domainMerged: false },
       },
       '2024',
@@ -739,7 +1007,7 @@ describe('specflow-engine.cjs', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [ ] P | F-01 |')),
+      plan: planWithRoadmap('- [ ] P | F-01 |'),
       state: {
         stateVersion: 1,
         domainMerged: true,
@@ -818,7 +1086,7 @@ describe('orchestrator.cjs', () => {
     );
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(plan),
+      plan: plan,
       state: { stateVersion: 1, activeGroup: 'Group A', autoProceedGroups: true },
     });
 
@@ -864,7 +1132,7 @@ describe('orchestrator.cjs', () => {
     );
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(plan),
+      plan: plan,
       state: { stateVersion: 1, activeGroup: 'Group A', autoProceedGroups: true },
     });
 
@@ -896,7 +1164,7 @@ describe('orchestrator.cjs', () => {
     );
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(plan),
+      plan: plan,
       state: { stateVersion: 1, activeGroup: 'Group A', autoProceedGroups: true },
     });
 
@@ -927,7 +1195,7 @@ describe('orchestrator.cjs', () => {
     );
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(plan),
+      plan: plan,
       state: { stateVersion: 1, activeGroup: 'Group B', autoProceedGroups: true },
     });
 
@@ -955,7 +1223,7 @@ describe('orchestrator.cjs', () => {
     );
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(plan),
+      plan: plan,
       state: { stateVersion: 1, activeGroup: 'Group A', autoProceedGroups: false },
     });
 
@@ -970,6 +1238,53 @@ describe('orchestrator.cjs', () => {
 });
 
 describe('knowledge loop solution', () => {
+  it('gates schema：未注册 gate 不能写入，passed 必须有 evidence', () => {
+    const ws = mkWorkspace();
+    const reqDir = path.join(ws, 'ai-docs', 'R1');
+    fs.mkdirSync(reqDir, { recursive: true });
+
+    const unknown = passGate(reqDir, 'random.unknown_gate', { evidence: 'x' });
+    assert.strictEqual(unknown.ok, false);
+    assert.match(unknown.error, /unknown gate id/);
+
+    const missingEvidence = passGate(reqDir, 'init.global_assets');
+    assert.strictEqual(missingEvidence.ok, false);
+    assert.match(missingEvidence.error, /requires evidence/);
+
+    assert.ok(GATE_DEFINITIONS['plan.readiness_review']);
+    const invalidShape = validateGate({ id: 'plan.readiness_review', status: 'passed', evidence: ['ok'] });
+    assert.strictEqual(invalidShape.ok, false);
+    assert.match(invalidShape.error, /requires snapshot/);
+  });
+
+  it('gates schema：定义约束 stage/scope，block 必须有 reason', () => {
+    const ws = mkWorkspace();
+    const reqDir = path.join(ws, 'ai-docs', 'R1');
+    fs.mkdirSync(reqDir, { recursive: true });
+
+    const blockedNoReason = validateGate({
+      id: 'init.global_assets',
+      status: 'blocked',
+      stage: 'Init',
+      scope: 'global',
+    });
+    assert.strictEqual(blockedNoReason.ok, false);
+    assert.match(blockedNoReason.error, /requires reason/);
+
+    const ok = blockGate(reqDir, 'init.global_assets', {
+      stage: 'Wrong',
+      scope: 'wrong',
+      reason: 'init failed',
+    });
+    assert.strictEqual(ok.ok, true, ok.error);
+    assert.strictEqual(ok.gate.stage, 'Init');
+    assert.strictEqual(ok.gate.scope, 'global');
+
+    const gates = readGates(reqDir);
+    assert.strictEqual(gates.gates['init.global_assets'].status, 'blocked');
+    assert.strictEqual(gates.gates['init.global_assets'].stage, 'Init');
+  });
+
   it('inventory-scan init 只建空壳 global-assets，不产生任何领域文件', () => {
     const ws = mkWorkspace();
     // 即使 src/services 下有目录，也不应被脚本识别为领域（领域识别属于 agent 职责）
@@ -991,7 +1306,7 @@ describe('knowledge loop solution', () => {
     const domainFiles = fs.readdirSync(domainsDir).filter((f) => f !== 'index.md');
     assert.deepStrictEqual(domainFiles, [], '脚本禁止硬编码识别领域；init 阶段不得生成任何 <domain>.md');
     const indexText = fs.readFileSync(indexPath, 'utf8');
-    assert.ok(!indexText.includes('| payment |'), 'init 阶段 index.md 不得出现从目录名派生的领域行');
+    assert.ok(!indexText.includes('| services__order__payment |'), 'init 阶段 index.md 不得出现从目录名派生的领域行');
     const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
     assert.deepStrictEqual(metadata, {}, 'init 阶段 metadata.json 应为空对象');
   });
@@ -1001,34 +1316,36 @@ describe('knowledge loop solution', () => {
     const init = spawnSync(process.execPath, [INVENTORY_SCAN, ws], { encoding: 'utf8' });
     assert.strictEqual(init.status, 0, init.stderr);
 
-    // 第一次 add-domain：由 agent 显式传入名称与证据
+    // 第一次 add-domain：由 agent 显式传入领域身份与证据
     const r1 = spawnSync(
       process.execPath,
-      [INVENTORY_SCAN, 'add-domain', '--workspace', ws, '--name', 'Payment', '--source', 'src/services/payment'],
+      [INVENTORY_SCAN, 'add-domain', '--workspace', ws, '--ref', 'services/order::payment', '--source', 'src/services/payment'],
       { encoding: 'utf8' }
     );
     assert.strictEqual(r1.status, 0, r1.stderr);
     const j1 = JSON.parse(r1.stdout);
     assert.strictEqual(j1.ok, true);
-    assert.strictEqual(j1.domain, 'payment', 'slug 应规范化为小写');
+    assert.strictEqual(j1.domain, 'services/order::payment');
+    assert.strictEqual(j1.domainKey, 'services__order__payment');
     assert.strictEqual(j1.created, true);
 
-    const domainPath = path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md');
+    const domainPath = path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md');
     const text = fs.readFileSync(domainPath, 'utf8');
     assert.ok(text.startsWith('---\n'));
     assert.ok(text.includes('sourceRequirementIds: []'));
     assert.ok(text.includes('**status**: Draft'));
-    assert.ok(/\|\s*字段\s*\|\s*类型\s*\|\s*含义\s*\|/.test(text), '应包含实体表头');
-    assert.ok(text.includes('```mermaid'), '应包含 Mermaid 状态机');
-    assert.ok(text.includes('Source: src/services/payment'), 'source hint 应由 agent 传入并体现在文档中');
+    assert.ok(text.includes('## 领域摘要'), '应包含预算化领域摘要');
+    assert.ok(/\|\s*术语\s*\|\s*语义\s*\|\s*约束 \/ 枚举\s*\|\s*来源\s*\|/.test(text), '应包含统一语言表头');
+    assert.ok(text.includes('## 证据附录'), '应包含证据附录');
+    assert.ok(text.includes('代码证据: src/services/payment'), 'source hint 应由 agent 传入并体现在证据附录中');
 
     const indexText = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'index.md'), 'utf8');
-    assert.ok(indexText.includes('| payment | Draft | src/services/payment |'));
+    assert.ok(indexText.includes('| services__order__payment | Draft | src/services/payment |'));
 
     // 第二次幂等调用：不覆盖、不重复追加
     const r2 = spawnSync(
       process.execPath,
-      [INVENTORY_SCAN, 'add-domain', '--workspace', ws, '--name', 'payment', '--source', 'src/services/payment'],
+      [INVENTORY_SCAN, 'add-domain', '--workspace', ws, '--ref', 'services/order::payment', '--source', 'src/services/payment'],
       { encoding: 'utf8' }
     );
     assert.strictEqual(r2.status, 0, r2.stderr);
@@ -1036,7 +1353,7 @@ describe('knowledge loop solution', () => {
     assert.strictEqual(j2.created, false, '已存在的 <domain>.md 不应被覆盖');
     assert.strictEqual(j2.indexAppended, false, 'index.md 已存在行不应重复追加');
     const indexText2 = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'index.md'), 'utf8');
-    const occurrences = indexText2.split('\n').filter((l) => l.trim().startsWith('| payment |')).length;
+    const occurrences = indexText2.split('\n').filter((l) => l.trim().startsWith('| services__order__payment |')).length;
     assert.strictEqual(occurrences, 1, 'index.md 中 payment 行应只有 1 条');
   });
 
@@ -1052,7 +1369,7 @@ describe('knowledge loop solution', () => {
 
 #### **[User]**:
 **[User]**: 已确认`,
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [ ] Task | F-01 |')),
+      plan: planWithRoadmap('- [ ] Task | F-01 |'),
     });
 
     const r = spawnSync(
@@ -1072,14 +1389,14 @@ describe('knowledge loop solution', () => {
     const reqId = 'R1';
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [ ] **T-A1** | implement | F-01 |')),
+      plan: planWithRoadmap('- [ ] **T-A1** | implement | F-01 |'),
       state: { stateVersion: 1, activeGroup: 'Group A' },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', reqId, '.temp'), { recursive: true });
     fs.writeFileSync(
       path.join(ws, 'ai-docs', reqId, '.temp', 'knowledge-patch.json'),
       JSON.stringify(
-        [{ domain: 'payment', category: 'rule', scope: '本地规则', content: '局部 patch 内容' }],
+        [{ domain: 'services/order::payment', category: 'rule', scope: '本地规则', content: '局部 patch 内容' }],
         null,
         2,
       ),
@@ -1087,7 +1404,7 @@ describe('knowledge loop solution', () => {
     );
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'domains'), { recursive: true });
     fs.writeFileSync(
-      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'),
+      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'),
       '# Payment\n[Verified]\n全局规则',
       'utf8'
     );
@@ -1109,37 +1426,38 @@ describe('knowledge loop solution', () => {
   it('archive 会将 patch 合并进 global-assets 并更新 metadata', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
+    writeCalibratedArchitectureLayers(ws, reqId);
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: true, archiveAnchorDone: true },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', reqId, '.temp'), { recursive: true });
     fs.writeFileSync(
       path.join(ws, 'ai-docs', reqId, '.temp', 'knowledge-patch.json'),
-      JSON.stringify([{ domain: 'payment', status: 'Draft', content: '新增已验证规则' }], null, 2),
+      JSON.stringify([{ domain: 'services/order::payment', status: 'Draft', content: '新增已验证规则' }], null, 2),
       'utf8'
     );
     fs.writeFileSync(
       path.join(ws, 'ai-docs', reqId, '.temp', 'coding-standard-patch.json'),
-      JSON.stringify([{ section: 'naming', content: '函数名使用动词开头' }], null, 2),
+      JSON.stringify([{ section: 'naming', content: '函数名使用动词开头', layers: ['ui-page'] }], null, 2),
       'utf8'
     );
 
     const r = spawnSync(process.execPath, [ARCHIVE, ws, reqId], { encoding: 'utf8' });
     assert.strictEqual(r.status, 0, r.stderr);
-    assert.ok(fs.existsSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md')));
+    assert.ok(fs.existsSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md')));
     assert.ok(fs.existsSync(path.join(ws, 'ai-docs', 'global-assets', 'standards', 'code-style.md')));
     const metadata = JSON.parse(
       fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'metadata.json'), 'utf8')
     );
-    assert.ok(metadata.payment);
-    assert.strictEqual(metadata.payment.last_requirement, reqId);
-    assert.deepStrictEqual(metadata.payment.sourceRequirementIds, [reqId]);
-    assert.strictEqual(metadata.payment.status, 'Draft');
-    assert.strictEqual(metadata.payment.maintainer, 'specflow-knowledge-reviewer');
-    assert.ok(!Object.prototype.hasOwnProperty.call(metadata.payment, 'lastRequirementId'), '不再保留兼容字段 lastRequirementId');
-    assert.ok(!Object.prototype.hasOwnProperty.call(metadata.payment, 'author'), '不再保留兼容字段 author');
+    assert.ok(metadata.services__order__payment);
+    assert.strictEqual(metadata.services__order__payment.last_requirement, reqId);
+    assert.deepStrictEqual(metadata.services__order__payment.sourceRequirementIds, [reqId]);
+    assert.strictEqual(metadata.services__order__payment.status, 'Draft');
+    assert.strictEqual(metadata.services__order__payment.maintainer, 'specflow-knowledge-reviewer');
+    assert.ok(!Object.prototype.hasOwnProperty.call(metadata.services__order__payment, 'lastRequirementId'), '不再保留兼容字段 lastRequirementId');
+    assert.ok(!Object.prototype.hasOwnProperty.call(metadata.services__order__payment, 'author'), '不再保留兼容字段 author');
   });
 
   it('verify 会输出 code-style 语义检查提示', () => {
@@ -1164,6 +1482,7 @@ describe('knowledge loop solution', () => {
   it('orchestrator change 默认会触发 --extract 并生成 patch 文件', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
+    writeCalibratedArchitectureLayers(ws, reqId);
     writeWorkspace(ws, reqId, {
       specify: `${specifyComplete()}
 
@@ -1171,7 +1490,7 @@ describe('knowledge loop solution', () => {
 > **背景**: 活动
 #### **[User]**:
 **[User]**: 满减逻辑已确认`,
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名')),
+      plan: planWithRoadmap('- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名 (layers: ui-page)'),
     });
 
     const r = spawnSync(
@@ -1190,17 +1509,18 @@ describe('knowledge loop solution', () => {
   it('engine 在 Plan 后会生成需求内 code-style.md，并仅把全局缺失规则写入 patch', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
+    writeCalibratedArchitectureLayers(ws, reqId);
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'standards'), { recursive: true });
     fs.writeFileSync(
       path.join(ws, 'ai-docs', 'global-assets', 'standards', 'code-style.md'),
       '# Code Style\n\n- [naming] 使用语义化命名\n',
       'utf8'
     );
-    const plan = appendPlanDecisionSummary(
+    const plan = 
       planWithRoadmap(
-        '- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名\n- [CodeStyle] api: controller 层禁止直接访问数据库'
+        '- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名 (layers: ui-page)\n- [CodeStyle] api: controller 层禁止直接访问数据库 (layers: ui-page)'
       )
-    );
+    ;
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan,
@@ -1222,9 +1542,10 @@ describe('knowledge loop solution', () => {
   it('mark-task 到 ready-for-qa 时会执行质量门禁', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
-    const plan = appendPlanDecisionSummary(
-      planWithRoadmap('- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名')
-    );
+    writeCalibratedArchitectureLayers(ws, reqId);
+    const plan = 
+      planWithRoadmap('- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名 (layers: ui-page)')
+    ;
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan,
@@ -1264,9 +1585,9 @@ describe('knowledge loop solution', () => {
   it('mark-group 到 ready-for-qa 时仅执行一次质量门禁并批量更新任务', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
-    const plan = appendPlanDecisionSummary(
+    const plan = 
       planWithRoadmap('- [ ] **T-A1** | coding | F-01 |\n- [ ] **T-A2** | coding | F-01 |')
-    );
+    ;
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan,
@@ -1299,9 +1620,9 @@ describe('knowledge loop solution', () => {
   it('mark-group 可将当前组 ready-for-qa 批量标记为 failed', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
-    const plan = appendPlanDecisionSummary(
+    const plan = 
       planWithRoadmap('- [?] **T-A1** | qa | F-01 |\n- [?] **T-A2** | qa | F-01 |')
-    );
+    ;
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan,
@@ -1323,7 +1644,8 @@ describe('knowledge loop solution', () => {
   it('mark-task failed 且 evidence 含 [CodeStyle] 时会沉淀 coding-standard-patch', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
-    const plan = appendPlanDecisionSummary(planWithRoadmap('- [?] **T-A1** | qa | F-01 |'));
+    writeCalibratedArchitectureLayers(ws, reqId);
+    const plan = planWithRoadmap('- [?] **T-A1** | qa | F-01 |');
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan,
@@ -1333,7 +1655,7 @@ describe('knowledge loop solution', () => {
     const r = runManageState(ws, reqId, 'mark-task', [
       'T-A1',
       'failed',
-      '[CodeStyle] naming: 禁止使用无语义变量名',
+      '[CodeStyle] naming: 禁止使用无语义变量名 (layers: ui-page)',
     ]);
     assert.strictEqual(r.status, 0, r.stderr);
     const j = JSON.parse(r.stdout);
@@ -1352,9 +1674,10 @@ describe('knowledge loop solution', () => {
   it('mark-group failed 且 evidence 含 [CodeStyle] 时会沉淀 coding-standard-patch', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
-    const plan = appendPlanDecisionSummary(
+    writeCalibratedArchitectureLayers(ws, reqId);
+    const plan = 
       planWithRoadmap('- [?] **T-A1** | qa | F-01 |\n- [?] **T-A2** | qa | F-01 |')
-    );
+    ;
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan,
@@ -1364,7 +1687,7 @@ describe('knowledge loop solution', () => {
     const r = runManageState(ws, reqId, 'mark-group', [
       'Group A',
       'failed',
-      '[CodeStyle] api: controller 层禁止直接访问数据库',
+      '[CodeStyle] api: controller 层禁止直接访问数据库 (layers: ui-page)',
     ]);
     assert.strictEqual(r.status, 0, r.stderr);
     const j = JSON.parse(r.stdout);
@@ -1383,9 +1706,9 @@ describe('knowledge loop solution', () => {
   it('mark-group completed 在混合结果时仅处理 ready-for-qa（其余任务需回退 mark-task）', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
-    const plan = appendPlanDecisionSummary(
+    const plan = 
       planWithRoadmap('- [?] **T-A1** | qa | F-01 |\n- [!] **T-A2** | qa | F-01 |')
-    );
+    ;
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan,
@@ -1407,9 +1730,10 @@ describe('knowledge loop solution', () => {
   it('mark-group 到 ready-for-qa 时会在保留历史补丁的基础上补充 plan 规范', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
-    const plan = appendPlanDecisionSummary(
-      planWithRoadmap('- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名')
-    );
+    writeCalibratedArchitectureLayers(ws, reqId);
+    const plan = 
+      planWithRoadmap('- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名 (layers: ui-page)')
+    ;
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan,
@@ -1419,7 +1743,7 @@ describe('knowledge loop solution', () => {
     fs.mkdirSync(tempDir, { recursive: true });
     fs.writeFileSync(
       path.join(tempDir, 'coding-standard-patch.json'),
-      JSON.stringify([{ section: 'legacy', content: '旧规则' }], null, 2),
+      JSON.stringify([{ section: 'legacy', content: '旧规则', layers: ['ui-page'] }], null, 2),
       'utf8'
     );
 
@@ -1487,7 +1811,7 @@ describe('knowledge loop solution', () => {
   it('知识注入会优先返回与当前任务更相关的 domain', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
-    let plan = appendPlanDecisionSummary(planWithRoadmap('- [ ] **T-A1** | implement | F-01 |'));
+    let plan = planWithRoadmap('- [ ] **T-A1** | implement | F-01 |');
     plan = plan.replace('Feature One', 'Payment Checkout');
     plan = plan.replace('Design.', 'Payment checkout and refund flow.');
     writeWorkspace(ws, reqId, {
@@ -1497,7 +1821,7 @@ describe('knowledge loop solution', () => {
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'domains'), { recursive: true });
     fs.writeFileSync(
-      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'),
+      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'),
       '# payment\n核心支付规则',
       'utf8'
     );
@@ -1513,8 +1837,45 @@ describe('knowledge loop solution', () => {
       fs.readFileSync(path.join(ws, 'ai-docs', reqId, '.temp', 'pending-protocol.json'), 'utf8')
     );
     const ctx = String(pending.knowledgeContext || '');
-    assert.ok(ctx.includes('payment.md'));
+    assert.ok(ctx.includes('services__order__payment.md'));
     assert.ok(!ctx.includes('inventory.md'));
+  });
+
+  it('知识注入存在已确认领域时只读取该领域，避免相似文本串入其他模块', () => {
+    const ws = mkWorkspace();
+    const reqId = 'R1';
+    let plan = planWithRoadmap('- [ ] **T-A1** | implement | F-01 |');
+    plan = plan.replace('Design.', 'Inventory wording appears in the task, but confirmed domain is payment.');
+    writeWorkspace(ws, reqId, {
+      specify: specifyComplete(),
+      plan,
+      state: { stateVersion: 1, activeGroup: 'Group A', domainInitRefs: ['services/order::payment'] },
+    });
+    writeBusinessDomain(ws, reqId, 'services/order::payment', '# payment\n需求级支付规则');
+    writeBusinessDomain(ws, reqId, 'services/inventory::inventory', '# inventory\n需求级库存规则');
+    fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'domains'), { recursive: true });
+    fs.writeFileSync(
+      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'),
+      '# payment\n全局支付规则',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__inventory__inventory.md'),
+      '# inventory\n全局库存规则',
+      'utf8'
+    );
+
+    const r = runEngine(ws, reqId);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const pending = JSON.parse(
+      fs.readFileSync(path.join(ws, 'ai-docs', reqId, '.temp', 'pending-protocol.json'), 'utf8')
+    );
+    const ctx = String(pending.knowledgeContext || '');
+    assert.ok(ctx.includes('services__order__payment.md'));
+    assert.ok(ctx.includes('需求级支付规则'));
+    assert.ok(!ctx.includes('inventory.md'));
+    assert.ok(!ctx.includes('需求级库存规则'));
+    assert.ok(!ctx.includes('全局库存规则'));
   });
 
   it('verify 在项目根存在 eslint 配置且缺少 lint:changed 时不会回退全量 lint', () => {
@@ -1617,7 +1978,7 @@ describe('archive knowledge reviewer gate', () => {
     const ws = mkWorkspace();
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, archiveAnchorDone: true, domainMerged: true, knowledgeReviewed: false },
     });
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -1631,25 +1992,25 @@ describe('archive knowledge reviewer gate', () => {
     const reqId = 'R1';
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: true, archiveAnchorDone: true },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', reqId, '.temp'), { recursive: true });
     fs.writeFileSync(
       path.join(ws, 'ai-docs', reqId, '.temp', 'knowledge-patch.json'),
-      JSON.stringify([{ domain: 'payment', category: 'rule', scope: '默认', content: '新增规则' }], null, 2),
+      JSON.stringify([{ domain: 'services/order::payment', category: 'rule', scope: '默认', content: '新增规则' }], null, 2),
       'utf8'
     );
     const r = spawnSync(process.execPath, [MERGE_GLOBAL_ASSETS, ws, reqId], { encoding: 'utf8' });
     assert.strictEqual(r.status, 0, r.stderr);
-    const domainPath = path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md');
+    const domainPath = path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md');
     assert.ok(fs.existsSync(domainPath));
     const metadata = JSON.parse(
       fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'metadata.json'), 'utf8')
     );
-    assert.ok(metadata.payment);
-    assert.strictEqual(metadata.payment.last_requirement, reqId);
-    assert.deepStrictEqual(metadata.payment.sourceRequirementIds, [reqId]);
+    assert.ok(metadata.services__order__payment);
+    assert.strictEqual(metadata.services__order__payment.last_requirement, reqId);
+    assert.deepStrictEqual(metadata.services__order__payment.sourceRequirementIds, [reqId]);
   });
 
   it('merge-global-assets 在未确认归档时拒绝提前合并', () => {
@@ -1657,13 +2018,13 @@ describe('archive knowledge reviewer gate', () => {
     const reqId = 'R1';
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: true, archiveAnchorDone: false },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', reqId, '.temp'), { recursive: true });
     fs.writeFileSync(
       path.join(ws, 'ai-docs', reqId, '.temp', 'knowledge-patch.json'),
-      JSON.stringify([{ domain: 'payment', title: 'Rule', content: '新增规则' }], null, 2),
+      JSON.stringify([{ domain: 'services/order::payment', title: 'Rule', content: '新增规则' }], null, 2),
       'utf8'
     );
     const r = spawnSync(process.execPath, [MERGE_GLOBAL_ASSETS, ws, reqId], { encoding: 'utf8' });
@@ -1671,7 +2032,7 @@ describe('archive knowledge reviewer gate', () => {
     const j = JSON.parse(r.stdout);
     assert.strictEqual(j.ok, false);
     assert.ok(String(j.error || '').includes('归档尚未确认'));
-    assert.ok(!fs.existsSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md')));
+    assert.ok(!fs.existsSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md')));
   });
 
   it('merge-global-assets 首次合并单一需求时 status 为 Draft（置信度阶梯化）', () => {
@@ -1679,18 +2040,18 @@ describe('archive knowledge reviewer gate', () => {
     const reqId = 'R1';
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: true, knowledgeReviewed: false, archiveAnchorDone: true },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', reqId, '.temp'), { recursive: true });
     fs.writeFileSync(
       path.join(ws, 'ai-docs', reqId, '.temp', 'knowledge-patch.json'),
-      JSON.stringify([{ domain: 'payment', title: 'Rule', content: '新增规则' }], null, 2),
+      JSON.stringify([{ domain: 'services/order::payment', title: 'Rule', content: '新增规则' }], null, 2),
       'utf8'
     );
     const r = spawnSync(process.execPath, [MERGE_GLOBAL_ASSETS, ws, reqId], { encoding: 'utf8' });
     assert.strictEqual(r.status, 0, r.stderr);
-    const domainPath = path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md');
+    const domainPath = path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md');
     const text = fs.readFileSync(domainPath, 'utf8');
     assert.ok(text.includes(`sourceRequirementIds: [${reqId}]`), 'frontmatter 应仅保留 sourceRequirementIds 为事实字段');
     assert.ok(!/^status:\s/m.test(text), 'frontmatter 不应再双写 status 派生字段');
@@ -1698,12 +2059,12 @@ describe('archive knowledge reviewer gate', () => {
     assert.ok(text.includes(`**last_requirement**: ${reqId}`), 'body badge 应现算 last_requirement');
   });
 
-  it('merge-global-assets 按 category 分桶：entity/rule/stateMachine/techDebt 各进对应表格', () => {
+  it('merge-global-assets 按 category 分桶：entity/rule/stateMachine/formula/pitfall/techDebt 各进对应表格', () => {
     const ws = mkWorkspace();
     const reqId = 'R-CAT';
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: true, knowledgeReviewed: false, archiveAnchorDone: true },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', reqId, '.temp'), { recursive: true });
@@ -1711,10 +2072,12 @@ describe('archive knowledge reviewer gate', () => {
       path.join(ws, 'ai-docs', reqId, '.temp', 'knowledge-patch.json'),
       JSON.stringify(
         [
-          { domain: 'payment', category: 'entity', term: 'payStatus', content: '付费状态枚举', enum: ['FREE', 'PAID'] },
-          { domain: 'payment', category: 'rule', scope: '上线判定', content: '可上线需审核通过', strength: 'hard' },
-          { domain: 'payment', category: 'stateMachine', from: '审核中', condition: '*', to: '禁编辑', content: '审核中禁编辑' },
-          { domain: 'payment', category: 'techDebt', id: 'TD-1', content: '付费档位扩展需升级枚举' },
+          { domain: 'services/order::payment', category: 'entity', term: 'payStatus', content: '付费状态枚举', enum: ['FREE', 'PAID'] },
+          { domain: 'services/order::payment', category: 'rule', scope: '上线判定', content: '可上线需审核通过', strength: 'hard' },
+          { domain: 'services/order::payment', category: 'stateMachine', from: '审核中', condition: '*', to: '禁编辑', content: '审核中禁编辑' },
+          { domain: 'services/order::payment', category: 'formula', scope: '热度判定', formula: 'MAX(当前热度值 × 2, 历史峰值热度值)', boundary: '内容库专辑' },
+          { domain: 'services/order::payment', category: 'pitfall', scope: 'suggest', content: '内容库 suggest 与推广域 SheetSuggest 不可混用', impact: '错误关联片单' },
+          { domain: 'services/order::payment', category: 'techDebt', id: 'TD-1', content: '付费档位扩展需升级枚举' },
         ],
         null,
         2,
@@ -1723,7 +2086,7 @@ describe('archive knowledge reviewer gate', () => {
     );
     const r = spawnSync(process.execPath, [MERGE_GLOBAL_ASSETS, ws, reqId], { encoding: 'utf8' });
     assert.strictEqual(r.status, 0, r.stderr);
-    const text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'), 'utf8');
+    const text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'), 'utf8');
     assert.ok(text.includes('## 统一语言 & 实体'));
     assert.ok(text.includes('payStatus'));
     assert.ok(text.includes('## 稳定业务规则'));
@@ -1731,8 +2094,14 @@ describe('archive knowledge reviewer gate', () => {
     assert.ok(text.includes('| Hard |') || text.includes('Hard'));
     assert.ok(text.includes('## 状态机 / 门禁'));
     assert.ok(text.includes('审核中'));
+    assert.ok(text.includes('## 核心公式'));
+    assert.ok(text.includes('MAX(当前热度值'));
+    assert.ok(text.includes('## 避坑 / 风险'));
+    assert.ok(text.includes('SheetSuggest'));
     assert.ok(text.includes('## 技术债 & TODO'));
     assert.ok(text.includes('TD-1'));
+    assert.ok(text.includes('## 领域摘要'));
+    assert.ok(text.includes('## 证据附录'));
   });
 
   it('merge-global-assets：category=ui 的条目不回流到全局 domains/', () => {
@@ -1740,7 +2109,7 @@ describe('archive knowledge reviewer gate', () => {
     const reqId = 'R-UI';
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: true, knowledgeReviewed: false, archiveAnchorDone: true },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', reqId, '.temp'), { recursive: true });
@@ -1748,8 +2117,8 @@ describe('archive knowledge reviewer gate', () => {
       path.join(ws, 'ai-docs', reqId, '.temp', 'knowledge-patch.json'),
       JSON.stringify(
         [
-          { domain: 'payment', category: 'ui', content: '列表列固定在付费状态后' },
-          { domain: 'payment', category: 'rule', content: '保存入参与查询字段一致' },
+          { domain: 'services/order::payment', category: 'ui', content: '列表列固定在付费状态后' },
+          { domain: 'services/order::payment', category: 'rule', content: '保存入参与查询字段一致' },
         ],
         null,
         2,
@@ -1760,7 +2129,7 @@ describe('archive knowledge reviewer gate', () => {
     assert.strictEqual(r.status, 0, r.stderr);
     const out = JSON.parse(r.stdout);
     assert.strictEqual(out.droppedUiCount, 1);
-    const text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'), 'utf8');
+    const text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'), 'utf8');
     assert.ok(text.includes('保存入参与查询字段一致'));
     assert.ok(!text.includes('列表列固定在付费状态后'), 'ui 类别不应回流到全局 domain md');
   });
@@ -1770,14 +2139,14 @@ describe('archive knowledge reviewer gate', () => {
     const ensureReq = (reqId) => {
       writeWorkspace(ws, reqId, {
         specify: specifyComplete(),
-        plan: appendPlanDecisionSummary(planAllCompleted()),
+        plan: planAllCompleted(),
         state: { stateVersion: 1, domainMerged: true, knowledgeReviewed: false, archiveAnchorDone: true },
       });
       fs.mkdirSync(path.join(ws, 'ai-docs', reqId, '.temp'), { recursive: true });
       fs.writeFileSync(
         path.join(ws, 'ai-docs', reqId, '.temp', 'knowledge-patch.json'),
         JSON.stringify(
-          [{ domain: 'payment', category: 'rule', content: '保存入参与查询字段一致', attributes: { scope: '入参一致性' } }],
+          [{ domain: 'services/order::payment', category: 'rule', content: '保存入参与查询字段一致', attributes: { scope: '入参一致性' } }],
           null,
           2,
         ),
@@ -1787,13 +2156,13 @@ describe('archive knowledge reviewer gate', () => {
       assert.strictEqual(r.status, 0, r.stderr);
     };
     ensureReq('REQ-A');
-    let text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'), 'utf8');
+    let text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'), 'utf8');
     assert.ok(text.includes('**status**: Draft'));
     ensureReq('REQ-B');
-    text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'), 'utf8');
+    text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'), 'utf8');
     assert.ok(text.includes('**status**: Consolidating'));
     ensureReq('REQ-C');
-    text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'), 'utf8');
+    text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'), 'utf8');
     assert.ok(text.includes('**status**: Verified'));
     assert.ok(text.includes('sourceRequirementIds: [REQ-A, REQ-B, REQ-C]'));
   });
@@ -1803,12 +2172,12 @@ describe('archive knowledge reviewer gate', () => {
     const reqId = 'R-LEG';
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: true, knowledgeReviewed: false, archiveAnchorDone: true },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'domains'), { recursive: true });
     fs.writeFileSync(
-      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'),
+      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'),
       '# payment\n\n- 旧规则一：支付状态必须同步\n- 旧规则二：退款链路独立\n',
       'utf8'
     );
@@ -1816,7 +2185,7 @@ describe('archive knowledge reviewer gate', () => {
     fs.writeFileSync(
       path.join(ws, 'ai-docs', reqId, '.temp', 'knowledge-patch.json'),
       JSON.stringify(
-        [{ domain: 'payment', category: 'rule', content: '新结构规则', attributes: { scope: '新增' } }],
+        [{ domain: 'services/order::payment', category: 'rule', content: '新结构规则', attributes: { scope: '新增' } }],
         null,
         2,
       ),
@@ -1824,7 +2193,7 @@ describe('archive knowledge reviewer gate', () => {
     );
     const r = spawnSync(process.execPath, [MERGE_GLOBAL_ASSETS, ws, reqId], { encoding: 'utf8' });
     assert.strictEqual(r.status, 0, r.stderr);
-    const text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'), 'utf8');
+    const text = fs.readFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'), 'utf8');
     assert.ok(text.includes('## 稳定业务规则'));
     assert.ok(text.includes('新结构规则'));
     assert.ok(text.includes('## Legacy (pre-migration)'));
@@ -1832,12 +2201,62 @@ describe('archive knowledge reviewer gate', () => {
     assert.ok(text.includes('旧规则二：退款链路独立'));
   });
 
+  it('domain-knowledge 保留证据附录并计算默认上下文预算', () => {
+    const domainKnowledge = require(
+      path.join(__dirname, '..', 'tools', 'domain-knowledge.cjs')
+    );
+    const md = [
+      '---',
+      'domain: services/order::payment',
+      'maintainer: specflow-knowledge-reviewer',
+      'sourceRequirementIds: [R1]',
+      '---',
+      '',
+      '# services/order::payment',
+      '',
+      '## 领域摘要',
+      '',
+      '| 项 | 内容 |',
+      '| --- | --- |',
+      '| 职责边界 | 支付规则 |',
+      '| 核心实体 | 订单 |',
+      '| 关键门禁 | 支付完成 |',
+      '| 常见冲突 | 无 |',
+      '| 非目标 | 结算 |',
+      '',
+      '## 稳定业务规则',
+      '',
+      '| 场景 | 规则 | 强度 | 来源 |',
+      '| --- | --- | --- | --- |',
+      ...Array.from({ length: 31 }, (_, i) => `| 场景${i} | 规则${i} | Hard | E-${i} |`),
+      '',
+      '## 证据附录',
+      '',
+      '### E-001 规则证据',
+      '',
+      '- 代码证据: services/order/payment.ts',
+      '- 详细事实: 被压缩的字段与边界。',
+      '',
+    ].join('\n');
+    const parsed = domainKnowledge.parseDomainMd(md);
+    assert.strictEqual(parsed.buckets.summary.length, 5);
+    assert.ok(parsed.evidenceLines.some((line) => line.includes('E-001')));
+    const budget = domainKnowledge.computeDomainBudgetUsage(parsed);
+    assert.ok(budget.overBudget.some((x) => x.key === 'ruleRows'));
+
+    const rendered = domainKnowledge.renderDomainMd(parsed);
+    assert.ok(rendered.includes('## 证据附录'));
+    assert.ok(rendered.includes('services/order/payment.ts'));
+    assert.ok(!rendered.includes('## Legacy (pre-migration)'));
+  });
+
   it('merge-global-assets 合并代码规范时同规则保留最新来源需求号', () => {
     const ws = mkWorkspace();
     const reqId = 'R2';
+    writeCalibratedArchitectureLayers(ws, reqId);
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: true, knowledgeReviewed: true, archiveAnchorDone: true },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'standards'), { recursive: true });
@@ -1849,7 +2268,7 @@ describe('archive knowledge reviewer gate', () => {
     fs.mkdirSync(path.join(ws, 'ai-docs', reqId, '.temp'), { recursive: true });
     fs.writeFileSync(
       path.join(ws, 'ai-docs', reqId, '.temp', 'coding-standard-patch.json'),
-      JSON.stringify([{ section: 'api', content: 'controller 层禁止直接访问数据库' }], null, 2),
+      JSON.stringify([{ section: 'api', content: 'controller 层禁止直接访问数据库', layers: ['ui-page'] }], null, 2),
       'utf8'
     );
 
@@ -1865,9 +2284,10 @@ describe('archive knowledge reviewer gate', () => {
   it('merge-global-assets 不回灌 kind=override 的代码规范条目（仅本需求生效）', () => {
     const ws = mkWorkspace();
     const reqId = 'R-OV';
+    writeCalibratedArchitectureLayers(ws, reqId);
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: true, knowledgeReviewed: true, archiveAnchorDone: true },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'standards'), { recursive: true });
@@ -1881,8 +2301,8 @@ describe('archive knowledge reviewer gate', () => {
       path.join(ws, 'ai-docs', reqId, '.temp', 'coding-standard-patch.json'),
       JSON.stringify(
         [
-          { section: 'naming', content: '后端枚举使用 SCREAMING_SNAKE_CASE', kind: 'addition' },
-          { section: 'logging', content: '本需求允许跳过 traceId 注入', kind: 'override', basedOn: '接入新 SDK 必须输出 traceId' },
+          { section: 'naming', content: '后端枚举使用 SCREAMING_SNAKE_CASE', kind: 'addition', layers: ['ui-page'] },
+          { section: 'logging', content: '允许在外部 SDK 未提供链路字段时跳过 traceId 注入', kind: 'override', layers: ['ui-page'], basedOn: '接入新 SDK 必须输出 traceId' },
         ],
         null,
         2,
@@ -1903,9 +2323,10 @@ describe('archive knowledge reviewer gate', () => {
   it('code-style applies 元数据：解析、渲染、归档合并都保留 globs（无关键词检索）', () => {
     const ws = mkWorkspace();
     const reqId = 'R-APPLY';
+    writeCalibratedArchitectureLayers(ws, reqId);
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1, domainMerged: true, knowledgeReviewed: true, archiveAnchorDone: true },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'standards'), { recursive: true });
@@ -1923,6 +2344,7 @@ describe('archive knowledge reviewer gate', () => {
             section: 'naming',
             content: '[Hard] 后端枚举使用 SCREAMING_SNAKE_CASE',
             kind: 'addition',
+            layers: ['ui-page'],
             applies: ['src/api/**/*.ts', 'src/services/**/*.ts'],
           },
         ],
@@ -1954,15 +2376,16 @@ describe('archive knowledge reviewer gate', () => {
   it('code-style 三段式渲染：plan 中 [CodeStyle:override] 进入 Overrides 段，[CodeStyle] 进入 Additions', () => {
     const ws = mkWorkspace();
     const reqId = 'R-RENDER';
+    writeCalibratedArchitectureLayers(ws, reqId);
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'standards'), { recursive: true });
     fs.writeFileSync(
       path.join(ws, 'ai-docs', 'global-assets', 'standards', 'code-style.md'),
       '# Code Style\n\n- [naming] 使用语义化命名\n',
       'utf8'
     );
-    const planMd = appendPlanDecisionSummary(planAllCompleted())
-      + '\n\n## Code Style\n\n- [CodeStyle] api: controller 层禁止直接访问数据库\n'
-      + '- [CodeStyle:override] logging: 本需求允许跳过 traceId 注入 (基于: 接入新 SDK 必须输出 traceId)\n';
+    const planMd = planAllCompleted()
+      + '\n\n## Code Style\n\n- [CodeStyle] api: controller 层禁止直接访问数据库 (layers: ui-page)\n'
+      + '- [CodeStyle:override] logging: 允许在外部 SDK 未提供链路字段时跳过 traceId 注入 (layers: ui-page) (基于: 接入新 SDK 必须输出 traceId)\n';
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan: planMd,
@@ -1981,7 +2404,7 @@ describe('archive knowledge reviewer gate', () => {
     assert.ok(md.includes('## Requirement Additions'));
     assert.ok(md.includes('controller 层禁止直接访问数据库'));
     assert.ok(md.includes('## Requirement Overrides'));
-    assert.ok(md.includes('本需求允许跳过 traceId 注入'));
+    assert.ok(md.includes('允许在外部 SDK 未提供链路字段时跳过 traceId 注入'));
     assert.ok(md.includes('(基于: 接入新 SDK 必须输出 traceId)'));
 
     const patch = JSON.parse(
@@ -2057,7 +2480,7 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
   it('extractCodingStandardPatchesFromPlan：把 [Hard] 剥离到 strength 字段，content 干净', () => {
     const planContent =
       '- [CodeStyle] api: [Hard] controller 禁止访问 DB (applies: src/api/**)\n'
-      + '- [CodeStyle] naming: 使用语义化命名\n';
+      + '- [CodeStyle] naming: 使用语义化命名 (layers: ui-page)\n';
     const patches = codeStyle.extractCodingStandardPatchesFromPlan(planContent);
     assert.strictEqual(patches.length, 2);
     const api = patches.find((p) => p.section === 'api');
@@ -2113,7 +2536,7 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
     assert.ok(md.includes('- [naming] R3'), md);
   });
 
-  it('renderRequirementCodeStyleMarkdown：主视图 Rules by Scope + 次视图 Rules by Section 同时出现', () => {
+  it('renderRequirementCodeStyleMarkdown：只输出需求增量，不渲染全局命中规则', () => {
     const md = codeStyle.renderRequirementCodeStyleMarkdown({
       requirementId: 'R1',
       existingInGlobal: [
@@ -2130,13 +2553,38 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
       ],
       requirementOverrides: [],
     });
-    assert.ok(md.includes('## Rules by Scope'), 'should have Rules by Scope');
-    assert.ok(md.includes('## Rules by Section'), 'should have Rules by Section');
-    assert.ok(md.includes('### `packages/*/src/composition/**/*.ts`'), 'should have scope heading');
+    assert.ok(!md.includes('## Matched Rules (from global)'), 'should not render matched global rules');
+    assert.ok(!md.includes('[naming] 使用语义化命名'), 'should not copy global rules');
+    assert.ok(md.includes('## Requirement Additions'), 'should have additions');
+    assert.ok(!md.includes('## Rules by Scope'), 'should not have duplicated Rules by Scope');
+    assert.ok(!md.includes('## Rules by Section'), 'should not have duplicated Rules by Section');
     assert.ok(
       md.includes('[Hard] 统一导出命名为 useXxx'),
       'Hard 标记应渲染到 content 前',
     );
+  });
+
+  it('code-style layers 元数据：提取、解析、合并、渲染时保留 architecture layer', () => {
+    const planContent =
+      '- [CodeStyle] api: [Hard] controller 禁止访问 DB (layers: controller, service) (applies: src/api/**)\n'
+      + '- [CodeStyle] api: controller 禁止访问 DB (layers: usecase)\n';
+    const patches = codeStyle.extractCodingStandardPatchesFromPlan(planContent);
+    assert.strictEqual(patches.length, 2);
+    assert.deepStrictEqual(patches[0].layers, ['controller', 'service']);
+
+    const merged = codeStyle.mergeCodingPatches([], patches);
+    assert.strictEqual(merged.length, 1);
+    assert.deepStrictEqual(merged[0].layers.sort(), ['controller', 'service', 'usecase']);
+
+    const line = codeStyle.renderRuleLine(merged[0]);
+    assert.ok(line.includes('(layers:'));
+    assert.ok(line.includes('controller'));
+    assert.ok(line.includes('service'));
+    assert.ok(line.includes('usecase'));
+
+    const parsed = codeStyle.parseGlobalCodeStyleRules(`# Code Style\n\n${line}\n`);
+    assert.strictEqual(parsed.length, 1);
+    assert.deepStrictEqual(parsed[0].layers.sort(), ['controller', 'service', 'usecase']);
   });
 
   it('parseGlobalCodeStyleRules：识别并剥离 [Hard] 前缀为 strength 字段', () => {
@@ -2175,7 +2623,7 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
       ].join('\n');
 
     fs.writeFileSync(
-      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'),
+      path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'),
       renderDomain('payment', 'Verified', '- 已验证规则：支付状态同步'),
       'utf8',
     );
@@ -2199,7 +2647,7 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
     assert.ok(ctx.includes('【已验证规则 · Verified】'), '应含 Verified banner');
     assert.ok(ctx.includes('【草案'), '应含 Draft banner');
 
-    const idxVerified = ctx.indexOf('### payment.md');
+    const idxVerified = ctx.indexOf('### services__order__payment.md');
     const idxDraft = ctx.indexOf('### promotion.md');
     assert.ok(idxVerified >= 0 && idxDraft >= 0, '两个 domain 均应入选');
     assert.ok(idxVerified < idxDraft, 'Verified 段应排在 Draft 段前面');
@@ -2228,7 +2676,7 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
       fs.writeFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', `${name}.md`), md, 'utf8');
     };
     write('promotion', 'Draft', 1);
-    write('payment', 'Verified', 3);
+    write('services__order__payment', 'Verified', 3);
     fs.mkdirSync(path.join(ws, 'ai-docs', reqId), { recursive: true });
 
     const engine = require(
@@ -2237,7 +2685,7 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
     const hintText = '支付 payment 与促销 promotion 场景全量命中。';
     const ctx = engine.buildKnowledgeContext(ws, reqId, hintText);
 
-    const verifiedIdx = ctx.indexOf('### payment.md');
+    const verifiedIdx = ctx.indexOf('### services__order__payment.md');
     const draftIdx = ctx.indexOf('### promotion.md');
     assert.ok(verifiedIdx >= 0 && draftIdx >= 0, '两个 domain 均应入选');
     // Verified 在前、Draft 在后（status 排序）
@@ -2290,7 +2738,7 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
     const reqId = 'R-CTX';
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [ ] **T-A1** | implement | F-01 |')),
+      plan: planWithRoadmap('- [ ] **T-A1** | implement | F-01 |'),
       state: { stateVersion: 1, activeGroup: 'Group A' },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'domains'), { recursive: true });
@@ -2300,20 +2748,20 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
     const merged = domainKnowledge.mergePatchesIntoDomainMd(
       '# payment\n\n',
       'payment',
-      [{ domain: 'payment', category: 'rule', scope: '既存', content: '已入全局的规则' }],
+      [{ domain: 'services/order::payment', category: 'rule', scope: '既存', content: '已入全局的规则' }],
       { requirementId: 'PAST' },
     );
-    fs.writeFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'payment.md'), merged.md, 'utf8');
+    fs.writeFileSync(path.join(ws, 'ai-docs', 'global-assets', 'domains', 'services__order__payment.md'), merged.md, 'utf8');
 
     fs.mkdirSync(path.join(ws, 'ai-docs', reqId, '.temp'), { recursive: true });
     fs.writeFileSync(
       path.join(ws, 'ai-docs', reqId, '.temp', 'knowledge-patch.json'),
       JSON.stringify(
         [
-          { domain: 'payment', category: 'rule', scope: '既存', content: '已入全局的规则' },
-          { domain: 'payment', category: 'rule', scope: '新增', content: '本期新增规则', strength: 'hard' },
-          { domain: 'payment', category: 'ui', content: '本期 UI 约定：按钮靠右' },
-          { domain: 'payment', category: 'entity', term: 'payStatus', content: '付费状态' },
+          { domain: 'services/order::payment', category: 'rule', scope: '既存', content: '已入全局的规则' },
+          { domain: 'services/order::payment', category: 'rule', scope: '新增', content: '本期新增规则', strength: 'hard' },
+          { domain: 'services/order::payment', category: 'ui', content: '本期 UI 约定：按钮靠右' },
+          { domain: 'services/order::payment', category: 'entity', term: 'payStatus', content: '付费状态' },
         ],
         null,
         2,
@@ -2339,13 +2787,13 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
     const reqId = 'R-BIZ';
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planWithRoadmap('- [ ] **T-A1** | implement | F-01 |')),
+      plan: planWithRoadmap('- [ ] **T-A1** | implement | F-01 |'),
       state: { stateVersion: 1, activeGroup: 'Group A' },
     });
     const bizDir = path.join(ws, 'ai-docs', reqId, 'business-domains');
     fs.mkdirSync(bizDir, { recursive: true });
     fs.writeFileSync(
-      path.join(bizDir, 'payment.md'),
+      path.join(bizDir, 'services__order__payment.md'),
       '# payment\n\n## 本期权威业务规则\n- 规则X：本期新定义的权威业务事实（Explorer 产出）\n',
       'utf8',
     );
@@ -2366,10 +2814,10 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
       '# payment\n\n',
       'payment',
       [
-        { domain: 'payment', category: 'entity', term: 'Order', content: '订单主实体', enum: ['A', 'B'] },
-        { domain: 'payment', category: 'rule', scope: '上线判定', content: '需审核通过', strength: 'hard' },
-        { domain: 'payment', category: 'stateMachine', from: '审核中', condition: '*', to: '禁编辑', content: 'sm' },
-        { domain: 'payment', category: 'techDebt', id: 'TD-9', content: '枚举需扩展', owner: 'alice' },
+        { domain: 'services/order::payment', category: 'entity', term: 'Order', content: '订单主实体', enum: ['A', 'B'] },
+        { domain: 'services/order::payment', category: 'rule', scope: '上线判定', content: '需审核通过', strength: 'hard' },
+        { domain: 'services/order::payment', category: 'stateMachine', from: '审核中', condition: '*', to: '禁编辑', content: 'sm' },
+        { domain: 'services/order::payment', category: 'techDebt', id: 'TD-9', content: '枚举需扩展', owner: 'alice' },
       ],
       { requirementId: 'R-FLAT' },
     );
@@ -2389,7 +2837,7 @@ describe('code-style 结构优化：strength 字段化 / dedup / globs 视图 / 
     const reqId = 'R-FP';
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
-      plan: appendPlanDecisionSummary(planAllCompleted()),
+      plan: planAllCompleted(),
       state: { stateVersion: 1 },
     });
     fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'standards'), { recursive: true });

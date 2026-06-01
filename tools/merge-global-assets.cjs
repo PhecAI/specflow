@@ -23,6 +23,7 @@ const {
   stripAppliesSuffix,
   renderRuleLine,
   renderRulesByScope,
+  filterCodingPatchesForCodeStyle,
   STRENGTH_HARD,
 } = require('./code-style.cjs')
 
@@ -32,6 +33,7 @@ const {
   mergePatchesIntoDomainMd,
   deriveConfidenceStatus,
 } = require('./domain-knowledge.cjs')
+const { normalizeDomainInitRef, domainRefToFileStem } = require('./specflow-state.cjs')
 
 const UTF8 = 'utf-8'
 
@@ -137,14 +139,8 @@ function ensureDir(dirPath) {
 }
 
 function normalizeDomainName(raw) {
-  return (
-    String(raw || 'general')
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9\-]/g, '-')
-      .replace(/\-+/g, '-')
-      .replace(/^\-|\-$/g, '') || 'general'
-  )
+  const ref = normalizeDomainInitRef(raw)
+  return domainRefToFileStem(ref)
 }
 
 function canMergeAtCurrentStage(workspaceRoot, requirementId, options = {}) {
@@ -185,15 +181,18 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
   // 按 domain 分组后一次性合并（domain-knowledge 模块负责分桶/去重/阶梯）
   const patchesByDomain = new Map()
   for (const patch of Array.isArray(knowledgePatches) ? knowledgePatches : []) {
-    const domain = normalizeDomainName(patch.domain || patch.slug || patch.module || 'general')
-    if (!patchesByDomain.has(domain)) patchesByDomain.set(domain, [])
-    patchesByDomain.get(domain).push(patch)
+    const ref = normalizeDomainInitRef(patch.domain || patch.domainRef || patch.slug || patch.module || '')
+    const domain = normalizeDomainName(ref)
+    if (!ref || !domain) continue
+    if (!patchesByDomain.has(domain)) patchesByDomain.set(domain, { ref, patches: [] })
+    patchesByDomain.get(domain).patches.push({ ...patch, domain: ref })
   }
 
-  for (const [domain, patches] of patchesByDomain.entries()) {
+  for (const [domain, grouped] of patchesByDomain.entries()) {
+    const { ref, patches } = grouped
     const domainPath = path.join(domainsDir, `${domain}.md`)
-    const prevText = fs.existsSync(domainPath) ? fs.readFileSync(domainPath, UTF8) : `# ${domain}\n\n`
-    const result = mergePatchesIntoDomainMd(prevText, domain, patches, { requirementId: String(requirementId || '') })
+    const prevText = fs.existsSync(domainPath) ? fs.readFileSync(domainPath, UTF8) : `# ${ref}\n\n`
+    const result = mergePatchesIntoDomainMd(prevText, ref, patches, { requirementId: String(requirementId || '') })
     totalDroppedUi += result.droppedUiCount || 0
 
     // 若本轮没有任何可回流条目（全是 ui / 空），跳过写盘（保持原样）
@@ -208,7 +207,8 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
     // metadata 作为"派生视图"：字段全部可由 sourceRequirementIds 推出；
     // 保留目的是让 CLI / 外部工具不必 parse md 即可读状态。
     metadata[domain] = {
-      domain,
+      domain: ref,
+      domainKey: domain,
       maintainer: 'specflow-knowledge-reviewer',
       sourceRequirementIds: sourceIds,
       status: ladder.status,
@@ -218,10 +218,12 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
     }
   }
 
-  if (Array.isArray(codingPatches) && codingPatches.length > 0) {
+  const codingFilter = filterCodingPatchesForCodeStyle(workspaceRoot, codingPatches)
+  const acceptedCodingPatches = codingFilter.accepted
+  if (acceptedCodingPatches.length > 0) {
     const prevStyle = fs.existsSync(codeStylePath) ? fs.readFileSync(codeStylePath, UTF8) : '# Code Style\n\n'
     const styleMap = parseCodeStyleMap(prevStyle)
-    for (const patch of codingPatches) {
+    for (const patch of acceptedCodingPatches) {
       // Overrides 默认仅本需求生效，不回灌全局；如需提升为全局规则，应人工编辑 standards/code-style.md。
       const kind = String((patch && patch.kind) || 'addition').trim().toLowerCase()
       if (kind === 'override') continue
@@ -266,6 +268,7 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
     ok: true,
     mergedDomains: Array.from(mergedDomains),
     droppedUiCount: totalDroppedUi,
+    droppedCodeStyleCount: codingFilter.rejected.length,
   }
 }
 
@@ -291,4 +294,3 @@ if (require.main === module) {
 }
 
 module.exports = { mergeKnowledgeIntoGlobalAssets }
-

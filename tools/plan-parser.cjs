@@ -75,11 +75,15 @@ const SECTION_REGISTRY = {
   feature:          { anchor: 'feature',           predicate: (n) => n.level === 2 && /feature\s*&?\s*design|功能/i.test(n.title) },
   roadmap:          { anchor: 'roadmap',           predicate: (n) => n.level === 2 && /roadmap|执行路径/i.test(n.title) },
   executionLog:     { anchor: 'execution-log',     predicate: (n) => n.level === 2 && /\blog\b|执行摘要/i.test(n.title) },
+  overview:         { anchor: 'overview',          predicate: (n) => n.level === 2 && /requirement\s*overview|需求概览|背景与目标|背景与价值/i.test(n.title) },
+  productDecisions: { anchor: 'product-decisions', predicate: (n) => n.level === 2 && /product\s*decisions|产品决策|决策与边界/i.test(n.title) },
+  capabilities:     { anchor: 'capabilities',      predicate: (n) => n.level === 2 && /capabilities|功能切片|功能能力/i.test(n.title) },
+  businessObjects:  { anchor: 'business-objects',  predicate: (n) => n.level === 2 && /business\s*objects|业务对象|对象与状态|状态/i.test(n.title) },
   executiveSummary: { anchor: 'executive-summary', predicate: (n) => n.level === 2 && /executive\s*summary|背景与价值/i.test(n.title) },
   userScenarios:    { anchor: 'user-scenarios',    predicate: (n) => n.level === 2 && /user\s*roles|用户角色/i.test(n.title) },
   businessRules:    { anchor: 'business-rules',    predicate: (n) => n.level === 2 && /business\s*rules|业务规则/i.test(n.title) },
   acceptanceCriteria:{ anchor: 'acceptance-criteria',predicate: (n) => n.level === 2 && /acceptance\s*criteria|验收标准/i.test(n.title) },
-  clarificationLog: { anchor: 'clarification-log', predicate: (n) => n.level === 2 && /clarification|待决策/i.test(n.title) },
+  clarificationLog: { anchor: 'clarification-log', predicate: (n) => n.level === 2 && /clarification|decision\s*log|决策记录|open\s*product\s*(?:decisions|questions)|待决策|待产品决策|待产品确认|待确认/i.test(n.title) },
   changelog:        { anchor: 'changelog',         predicate: (n) => n.level === 2 && /changelog|修改日志/i.test(n.title) },
 }
 
@@ -245,30 +249,43 @@ function cqContractTechNeedsDetailField(cqId) {
 }
 
 /**
- * 每轮最多展示 `maxCq` 条**澄清**（一条 Contract/Tech 澄清 = 点选 + 可选 `__detail`，算 1 条 CQ）。
- * @param {object[]} flatQuestions - 已按 CQ 顺序展开的 `questions`（含 `cqId__detail`）
- */
-function takeFirstCqQuestionBatch(flatQuestions, maxCq = 3) {
-  const out = []
-  let cqCount = 0
-  for (const q of flatQuestions) {
-    const id = String(q && q.id ? q.id : '')
-    const isDetail = id.endsWith('__detail')
-    if (!isDetail) {
-      if (cqCount >= maxCq) break
-      cqCount++
-    }
-    out.push(q)
-  }
-  return out
-}
-
-/**
  * 面向用户的话术（避免暴露内部 CQ id、Section 等）；引擎 JSON 仍使用 cqId 作为 question id。
  */
-function humanizeClarificationQuestion({ cqId, cqTitle, background, options }) {
+function humanizeClarificationQuestion({
+  cqId,
+  cqTitle,
+  background,
+  decisionPrompt,
+  confirmationPrompt,
+  whyCritical,
+  recommendation,
+  options,
+}) {
   const id = String(cqId || '')
   const opts = Array.isArray(options) ? options : []
+  const decisionText = String(decisionPrompt || '').trim()
+  const confirmationText = String(confirmationPrompt || '').trim()
+  const whyText = String(whyCritical || '').trim()
+  const recommendationText = String(recommendation || '').trim()
+
+  function buildDecisionPrompt({ suffix = '' } = {}) {
+    const lines = []
+    if (confirmationText) {
+      lines.push(`需要你确认：${confirmationText}`)
+    } else if (decisionText) {
+      lines.push(`需要你决定：${decisionText}`)
+    } else if (cqTitle) {
+      lines.push(String(cqTitle).trim())
+    }
+    if (whyText) lines.push(`为什么关键：${whyText}`)
+    if (recommendationText) lines.push(`SpecFlow 建议：${recommendationText}`)
+    if (!lines.length && background) lines.push(String(background).trim())
+    const optionLines = opts.length > 0 ? opts.map((o) => `- ${o.label}`).join('\n') : ''
+    if (opts.length > 0) {
+      return `${lines.filter(Boolean).join('\n\n')}${suffix}\n\n请点选一项：\n${optionLines}`.trim()
+    }
+    return `${lines.filter(Boolean).join('\n\n') || '请补充说明'}。`
+  }
 
   if (id.startsWith('CQ-Domain-Init')) {
     return {
@@ -284,6 +301,21 @@ function humanizeClarificationQuestion({ cqId, cqTitle, background, options }) {
   }
 
   if (id.startsWith('CQ-Contract') || /^CQ-Tech-/.test(id)) {
+    if (decisionText || confirmationText || whyText || recommendationText) {
+      return {
+        prompt: buildDecisionPrompt({
+          suffix:
+            '\n\n如果选择「其他」或需要补充口径，可继续填写补充说明输入框；一般不需要自己打开文档编辑。',
+        }),
+        options: opts.map((o) => {
+          const lab = String(o.label || '')
+          if (/^Option\s+A/i.test(lab)) return { ...o, label: lab.replace(/^Option\s+A[^(：:]*(?:\([^)]*\))?\s*[:：]?\s*/i, 'A：') }
+          if (/^Option\s+B/i.test(lab)) return { ...o, label: lab.replace(/^Option\s+B[^(：:]*(?:\([^)]*\))?\s*[:：]?\s*/i, 'B：') }
+          if (/^Option\s+C/i.test(lab)) return { ...o, label: lab.replace(/^Option\s+C[^(：:]*(?:\([^)]*\))?\s*[:：]?\s*/i, 'C：') }
+          return o
+        }),
+      }
+    }
     return {
       prompt:
         '缺少可落地的接口或字段依据。**三选一**；另有**补充说明输入框**（选「其他」时填写；选 A/B 也可填）。一般会由助手写回需求说明，**不必自己打开文档编辑**。\n\n先点选一项。',
@@ -294,6 +326,13 @@ function humanizeClarificationQuestion({ cqId, cqTitle, background, options }) {
         if (/^Option\s+C/i.test(lab)) return { ...o, label: 'C：其他（自定义说明，见下方输入框）' }
         return o
       }),
+    }
+  }
+
+  if (decisionText || confirmationText || whyText || recommendationText) {
+    return {
+      prompt: buildDecisionPrompt(),
+      options: opts,
     }
   }
 
@@ -308,6 +347,13 @@ function humanizeClarificationQuestion({ cqId, cqTitle, background, options }) {
         : `${lead || '请补充说明'}。`,
     options: opts,
   }
+}
+
+function extractQuotedField(cqBody, label) {
+  const escaped = String(label || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`>\\s*\\*\\*${escaped}\\*\\*(?::|：)?\\s*([^\\n]*)`, 'i')
+  const m = String(cqBody || '').match(re)
+  return m ? m[1].trim() : ''
 }
 
 /**
@@ -344,6 +390,10 @@ function parseClarificationText(text) {
       const quoteMatch = cqBody.match(/>\s*(.*?)\n/)
       if (quoteMatch) background = quoteMatch[1].trim() + '\n\n'
     }
+    const decisionPrompt = extractQuotedField(cqBody, '需要你决定')
+    const confirmationPrompt = extractQuotedField(cqBody, '需要你确认')
+    const whyCritical = extractQuotedField(cqBody, '为什么关键')
+    const recommendation = extractQuotedField(cqBody, 'SpecFlow 建议')
 
     const options = []
     const optRegex = /-\s*\*\*(Option\s+[A-Z0-9]+.*?)\*\*(?::|：)?\s*(.*)/g
@@ -383,6 +433,10 @@ function parseClarificationText(text) {
       cqId,
       cqTitle,
       background,
+      decisionPrompt,
+      confirmationPrompt,
+      whyCritical,
+      recommendation,
       options,
     })
 
@@ -414,10 +468,7 @@ function parseClarificationText(text) {
     }
   }
 
-  // 渐进式披露：每轮最多处理 3 条 CQ（Contract/Tech 每条含点选 + __detail，仍计 1 条 CQ）
-  const questionsBatch = takeFirstCqQuestionBatch(questions, 3)
-
-  return { open: openCount > 0, openCount, questions: questionsBatch, questionsAll: questions }
+  return { open: openCount > 0, openCount, questions, questionsAll: questions }
 }
 
 /**
@@ -439,6 +490,32 @@ function parseClarificationFromTree(tree, rawContent) {
 }
 
 /**
+ * 检测散落在正式正文中的 `[?]`。结构化 CQ 标题允许作为临时澄清草稿存在；
+ * 其他位置的 `[?]` 会导致 Plan 门禁阻塞，避免产品/技术疑问混入已定稿正文。
+ */
+function findInlineClarificationMarkers(rawContent) {
+  const text = String(rawContent || '')
+  if (!text.trim()) return { count: 0, items: [] }
+
+  const withoutCode = text.replace(/```[\s\S]*?```/g, '')
+  const items = []
+  const lines = withoutCode.split('\n')
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx]
+    if (!line.includes('[?]')) continue
+    const trimmed = line.trim()
+    if (/^#{3,6}\s+\[\?\]\s*CQ/i.test(trimmed)) continue
+    items.push({
+      line: idx + 1,
+      text: trimmed.slice(0, 240),
+    })
+    if (items.length >= 8) break
+  }
+
+  return { count: items.length, items }
+}
+
+/**
  * 判断章节是否有实质内容（非仅标题/锚点/空行）。
  * 用于区分「Draft 占位」与「用户或 AI 已补全」的 Section 4-6。
  */
@@ -457,8 +534,8 @@ function sectionHasSubstantiveContent(node) {
 /** 检测 specify.md 是否完整：没有未闭合的澄清且包含必要的章节。这部分被简化，因为现在是一次性生成。 */
 function isSpecifyCompleteFromTree(tree) {
   // 只要没有 open 的澄清，就认为完成（AST 会被 parseClarificationFromTree 处理）
-  // 为了安全，检查是否有 acceptanceCriteria 即可
-  const section = findByKey(tree, 'acceptanceCriteria')
+  // 新结构以 Capabilities 的「验收要点」为完整性依据；旧结构回退检查 Acceptance Criteria。
+  const section = findByKey(tree, 'capabilities') || findByKey(tree, 'acceptanceCriteria')
   return !!section && sectionHasSubstantiveContent(section)
 }
 
@@ -554,9 +631,9 @@ function buildFocusPlanFromTree(tree, activeGroupId) {
 
 /**
  * 为 Plan 子代理构建精简版 Specify 上下文。
- * 保留：Section 1 (Executive Summary)、Section 2 (User Scenarios)、
- * Section 3 (Business Rules)、Section 4 (Acceptance Criteria)。
- * 裁掉：Section 5 (Clarification Log)、Section 6 (Changelog)。
+ * 新结构保留：Requirement Overview、Product Decisions、Capabilities、Business Objects。
+ * 旧结构回退保留：Executive Summary、User Scenarios、Business Rules、Acceptance Criteria。
+ * 裁掉：Decision Log / Clarification Log、Changelog。
  */
 function buildFocusSpecify(specifyTree) {
   if (!specifyTree) return null
@@ -570,7 +647,14 @@ function buildFocusSpecify(specifyTree) {
     if (header) parts.push(header)
   }
 
-  const sectionKeys = ['executiveSummary', 'userScenarios', 'businessRules', 'acceptanceCriteria']
+  const hasNewStructure =
+    findByKey(specifyTree, 'overview') ||
+    findByKey(specifyTree, 'productDecisions') ||
+    findByKey(specifyTree, 'capabilities') ||
+    findByKey(specifyTree, 'businessObjects')
+  const sectionKeys = hasNewStructure
+    ? ['overview', 'productDecisions', 'capabilities', 'businessObjects']
+    : ['executiveSummary', 'userScenarios', 'businessRules', 'acceptanceCriteria']
   for (const key of sectionKeys) {
     const section = findByKey(specifyTree, key)
     if (section) {
@@ -601,7 +685,7 @@ function buildFocusArchive(specifyTree, planTree) {
       if (header) parts.push(header)
     }
 
-    const summary = findByKey(specifyTree, 'executiveSummary')
+    const summary = findByKey(specifyTree, 'overview') || findByKey(specifyTree, 'executiveSummary')
     if (summary) {
       parts.push(renderNode(summary))
     }
@@ -702,6 +786,7 @@ module.exports = {
   parseGroupsFromTree,
   deriveRoadmapStats,
   parseClarificationFromTree,
+  findInlineClarificationMarkers,
   isSpecifyCompleteFromTree,
   buildFocusPlanFromTree,
   buildFocusSpecify,

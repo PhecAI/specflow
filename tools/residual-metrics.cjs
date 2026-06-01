@@ -92,6 +92,14 @@ function buildMinimalGatesFromFiles(requirementDir) {
     ? parseClarificationFromTree(specifyTree, specifyContent)
     : { open: false, openCount: 0 }
   const specifyMtimeNow = specifyContent ? getMtimeMs(pathSpecify) : 0
+  const specifyReviewStatus =
+    state.specifyReviewStatus === 'ready' || state.specifyReviewStatus === 'blocked'
+      ? state.specifyReviewStatus
+      : null
+  const specifyReviewMtimeStored =
+    typeof state.specifyReviewMtime === 'number' && Number.isFinite(state.specifyReviewMtime)
+      ? state.specifyReviewMtime
+      : null
   const specifyReviewPassedMtimeStored =
     typeof state.specifyReviewPassedMtime === 'number' && Number.isFinite(state.specifyReviewPassedMtime)
       ? state.specifyReviewPassedMtime
@@ -100,6 +108,9 @@ function buildMinimalGatesFromFiles(requirementDir) {
   const specifyReviewValid =
     hasSpecify &&
     specifyMtimeNow > 0 &&
+    specifyReviewStatus === 'ready' &&
+    specifyReviewMtimeStored != null &&
+    specifyMtimeNow === specifyReviewMtimeStored &&
     specifyReviewPassedMtimeStored != null &&
     specifyMtimeNow === specifyReviewPassedMtimeStored
   const hasAutoClarifications = typeof specifyContent === 'string' && /###\s+\[Auto\]\s*CQ/i.test(specifyContent)

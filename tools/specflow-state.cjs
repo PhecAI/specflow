@@ -9,16 +9,15 @@
  * - planAckMtime: **已弃用**（保留 schema 仅为向后兼容旧 state 文件；当前版本的引擎与 manage-state 不再读写此字段）。
  * - groupRetryCount: QA 失败重试计数（死循环熔断）
  * - domainMerged: 归档前领域文档是否已由 domain-explorer 合并
- * - codeStyleExplored: 进入 Plan 之前是否已由 code-style-explorer 完成需求级规范评估
- * - codeStyleExploredMtime: 上述完成时刻的 specify.md mtime（ms）；spec 变更后需重新评估
+ * - codeStyleExplored: 兼容旧状态；当前主流程不再把 code-style explorer 作为 Plan 前门禁
+ * - codeStyleExploredMtime: 兼容旧状态；旧流程记录 specify.md mtime（ms）
  * - archiveAnchorDone: 用户是否已确认执行物理归档
- * - ackSpecifyBeforePlan: 用户是否已在弹窗确认进入 Plan（尚无 plan.md 时）
- * - specifyAckMtime: 上述确认时刻的 specify.md mtime（ms）；spec 变更后需重新确认
- * - specifyReviewPassedMtime: 架构师评审通过时 specify.md 的 mtime（ms）；与当前文件 mtime 不一致则须重新评审后方可首次生成 plan.md
+ * - ackSpecifyBeforePlan / specifyAckMtime: 兼容旧流程；新门禁写入 `.temp/gates.json` 的 `plan.user_confirm_start`
+ * - specifyReviewStatus / specifyReviewMtime / specifyReviewPassedMtime / specifyReviewBlockReason / specifyReviewContractEvidence:
+ *   兼容旧流程；新门禁写入 `.temp/gates.json` 的 `plan.readiness_review`
  * - domainInitChoice: 尚无 specify.md 时用户对「业务知识库」策略的选择：scan=先扫代码逐步生成，skip=本次不生成
- * - domainInitSlug: 选 scan 时的领域标识（小写英文/数字/连字符），用于 ai-docs/<需求号>/business-domains/<slug>.md；选 skip 时不应保留
- * - domainInitSlugs: scan 时可同时登记多个领域（上限 8）；domainInitSlug 始终等于首元素
- * - domainInitCandidates: agent 在 S1 提交的领域「候选」列表（尚未确认，等待 S2 yes/no 采纳）
+ * - domainInitRefs: scan 时登记的领域身份（上限 8），格式为 <scope>::<slug>，例如 services/order::payment
+ * - domainInitCandidateRefs: agent 在 S1 提交的领域身份候选列表（尚未确认，等待 S2 yes/no 采纳）
  * - residualItems: 由脚本根据 specify.md「验收标准」中未勾选 AC 行动态计算，勿手改
  * - acTotal / acPassed: 同上章节内 `- [ ]` / `- [x]` 计数；remaining = acTotal − acPassed（与 residualItems.length 一致当有文案时）
  * - residual: 结构化残差（unmetAcCount / failedTestsCount / openGatesCount / missingEvidencesCount / totalScore），由 residual-metrics 写入
@@ -35,7 +34,7 @@ const UTF8 = 'utf-8'
 const STATE_FILE = '.temp/specflow-state.json'
 
 /** 当前契约版本；仅当字段含义变更时递增 */
-const STATE_VERSION = 3
+const STATE_VERSION = 4
 
 /**
  * 允许的键与类型约束（state schema）。
@@ -54,12 +53,18 @@ const STATE_SCHEMA = {
   archiveAnchorDone: { type: 'boolean' },
   ackSpecifyBeforePlan: { type: 'boolean' },
   specifyAckMtime: { type: 'number', min: 0, integer: false },
+  specifyReviewStatus: { type: 'string', enum: ['ready', 'blocked'] },
+  specifyReviewMtime: { type: 'number', min: 0, integer: false },
   specifyReviewPassedMtime: { type: 'number', min: 0, integer: false },
+  specifyReviewBlockReason: { type: 'string', minLength: 1 },
+  specifyReviewContractEvidence: {
+    type: 'string',
+    enum: ['confirmed', 'mock_allowed', 'not_required', 'missing', 'unknown'],
+  },
   autoClarificationAckMtime: { type: 'number', min: 0, integer: false },
   domainInitChoice: { type: 'string', enum: ['scan', 'skip'] },
-  domainInitSlug: { type: 'string', minLength: 1, maxLength: 64 },
-  domainInitSlugs: { type: 'array', maxItems: 8, itemMaxLength: 64 },
-  domainInitCandidates: { type: 'array', maxItems: 8, itemMaxLength: 64 },
+  domainInitRefs: { type: 'array', maxItems: 8, itemMaxLength: 160 },
+  domainInitCandidateRefs: { type: 'array', maxItems: 8, itemMaxLength: 160 },
   residualItems: { type: 'array', maxItems: 80, itemMaxLength: 600 },
   acTotal: { type: 'number', min: 0, integer: true },
   acPassed: { type: 'number', min: 0, integer: true },
@@ -130,6 +135,38 @@ function normalizeDomainInitSlug(raw) {
   return s
 }
 
+function normalizeDomainInitScope(raw) {
+  if (raw == null || typeof raw !== 'string') return null
+  let s = raw.trim().toLowerCase().replace(/\s+/g, '-')
+  s = s.replace(/\\/g, '/').replace(/[^a-z0-9_/-]/g, '-').replace(/-+/g, '-')
+  s = s.replace(/\/+/g, '/').replace(/^[-/]+|[-/]+$/g, '')
+  if (s.length < 1 || s.length > 96) return null
+  return s
+}
+
+function normalizeDomainInitRef(raw) {
+  if (raw == null || typeof raw !== 'string') return null
+  const text = raw.trim()
+  const idx = text.indexOf('::')
+  if (idx <= 0 || idx === text.length - 2) return null
+  const scope = normalizeDomainInitScope(text.slice(0, idx))
+  const slug = normalizeDomainInitSlug(text.slice(idx + 2))
+  if (!scope || !slug) return null
+  return `${scope}::${slug}`
+}
+
+function domainRefToFileStem(raw) {
+  const ref = normalizeDomainInitRef(raw)
+  if (!ref) return null
+  return ref.replace(/::/g, '__').replace(/\//g, '__')
+}
+
+function domainRefSlug(raw) {
+  const ref = normalizeDomainInitRef(raw)
+  if (!ref) return ''
+  return ref.slice(ref.indexOf('::') + 2)
+}
+
 function getStatePath(dir) {
   return path.join(dir, STATE_FILE)
 }
@@ -170,12 +207,6 @@ function sanitizeState(raw) {
     }
     if (schema.type === 'string') {
       if (typeof v !== 'string') continue
-      if (key === 'domainInitSlug') {
-        const n = normalizeDomainInitSlug(v)
-        if (!n) continue
-        out[key] = n
-        continue
-      }
       const s = v.trim()
       if (schema.minLength && s.length < schema.minLength) continue
       if (schema.enum && Array.isArray(schema.enum) && !schema.enum.includes(s)) continue
@@ -190,8 +221,8 @@ function sanitizeState(raw) {
       for (const el of v) {
         if (typeof el !== 'string') continue
         let s = el.trim()
-        if (key === 'domainInitSlugs' || key === 'domainInitCandidates') {
-          const n = normalizeDomainInitSlug(s)
+        if (key === 'domainInitRefs' || key === 'domainInitCandidateRefs') {
+          const n = normalizeDomainInitRef(s)
           if (!n) continue
           s = n
         }
@@ -243,6 +274,9 @@ module.exports = {
   STATE_VERSION,
   STATE_SCHEMA,
   normalizeDomainInitSlug,
+  normalizeDomainInitRef,
+  domainRefToFileStem,
+  domainRefSlug,
   sanitizeResidual,
   sanitizeMetricsHistory,
   sanitizeState,

@@ -5,27 +5,45 @@
 const fs = require('fs');
 const path = require('path');
 
-/** 完整 specify.md（可进 Plan：含 acceptanceCriteria 实质内容、无未闭合 CQ） */
+/** 完整 specify.md（可进 Plan：含 capabilities/验收要点实质内容、无未闭合 CQ） */
 function specifyComplete(extraInBody = '') {
   return `# Test Requirement
 
-## Executive Summary
-<!-- specflow:section=executive-summary -->
-Summary content.
+## Requirement Overview
+<!-- specflow:section=overview -->
+- **业务背景**: Summary content.
+- **目标**: Test goal.
+- **本期范围**: Test scope.
+- **非目标**: None.
+- **本仓职责边界**: Test workspace.
 
-## User Scenarios
-<!-- specflow:section=user-scenarios -->
-User roles.
+## Product Decisions & Boundaries
+<!-- specflow:section=product-decisions -->
+- **已确认产品决策**: Test decision.
 
-## Business Rules
-<!-- specflow:section=business-rules -->
-Rules.
+## Capabilities
+<!-- specflow:section=capabilities -->
+### 3.1 Test capability
+- **用户目标**: Complete test.
+- **入口 / 触发条件**: Test entry.
+- **主流程**:
+  1. Do it.
+- **业务规则**:
+  - Rules.
+- **异常与边界**:
+  - None.
+- **权限要求**:
+  - Default.
+- **验收要点**:
+  - Done.
 
-## Acceptance Criteria
-<!-- specflow:section=acceptance-criteria -->
-- AC-1: Done.
+## Business Objects & States
+<!-- specflow:section=business-objects -->
+- **Object**: Test object.
+- **状态定义**:
+  - Ready: ready.
 
-## Clarification Log
+## Decision Log
 <!-- specflow:section=clarification-log -->
 ${extraInBody}
 
@@ -35,7 +53,7 @@ ${extraInBody}
 `;
 }
 
-/** 含 [BLOCKER] 且规格未完成（无 AC）→ 阶段 Specify，走 Specify 分支 block */
+/** 含 [BLOCKER] 且规格未完成（无能力切片）→ 阶段 Specify，走 Specify 分支 block */
 function specifyDraftWithBlocker() {
   return `# Draft
 
@@ -69,7 +87,7 @@ function specifyWithOpenClarification() {
 }
 
 /**
- * 草稿级 specify（无 Acceptance Criteria 实质 → specifyComplete=false，阶段仍为 Specify）
+ * 草稿级 specify（无 Capabilities 实质 → specifyComplete=false，阶段仍为 Specify）
  * → determineAction 默认派发 specflow-specify
  */
 function specifyDraftMinimal() {
@@ -90,7 +108,7 @@ Draft only.
 }
 
 /**
- * CQ-Domain-Init：澄清已闭合、仍缺 AC → 阶段 Specify；
+ * CQ-Domain-Init：澄清已闭合、仍缺 Capabilities → 阶段 Specify；
  * 领域文件缺失 → dispatch domain-explorer（非 Merge）
  * 标题需含：缺少 [DomainName] 业务知识库（兼容旧文「领域知识库」）
  */
@@ -159,12 +177,6 @@ function planAllCompleted() {
   return planWithRoadmap('- [x] Done | F-01 |');
 }
 
-/** 在 plan 中插入 decision-summary（供 confirm_start_group 摘要） */
-function appendPlanDecisionSummary(planMd, summary = 'Plan decision summary') {
-  if (planMd.includes('specflow:decision-summary')) return planMd;
-  return planMd.replace(/\n## Changelog\n/, `\n\n<!-- specflow:decision-summary -->\n${summary}\n<!-- /specflow:decision-summary -->\n\n## Changelog\n`);
-}
-
 /** 含 Roadmap [Blocked] → hasBlockedTask */
 function planWithBlockedTag() {
   return planWithRoadmap('- [ ] T | F-01 |\n\n[Blocked] waiting');
@@ -215,9 +227,11 @@ function writeHistoryRequirement(workspaceRoot, requirementId, payload, year = '
 }
 
 function writeBusinessDomain(workspaceRoot, requirementId, name, body = '# Domain\n') {
+  const { domainRefToFileStem } = require('../tools/specflow-state.cjs');
   const d = path.join(workspaceRoot, 'ai-docs', requirementId, 'business-domains');
   fs.mkdirSync(d, { recursive: true });
-  fs.writeFileSync(path.join(d, `${name}.md`), body, 'utf8');
+  const stem = domainRefToFileStem(name) || name;
+  fs.writeFileSync(path.join(d, `${stem}.md`), body, 'utf8');
 }
 
 module.exports = {
@@ -229,7 +243,6 @@ module.exports = {
   specifyIncompleteDomainCQClosed,
   planWithRoadmap,
   planAllCompleted,
-  appendPlanDecisionSummary,
   planWithBlockedTag,
   planWithBlocker,
   planEmptyGroup,
@@ -238,4 +251,3 @@ module.exports = {
   writeRequirementDir,
   writeBusinessDomain,
 };
-
