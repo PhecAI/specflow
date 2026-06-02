@@ -1,5 +1,5 @@
 /**
- * 结构化残差：合并 specify AC、verify 最近一次结果、引擎门禁与 Roadmap 待验收任务，
+ * 结构化残差：合并 specify AC、引擎门禁与 Roadmap 待验收任务，
  * 写入 specflow-state.json 的 residual / metricsHistory（引擎轮次追加历史）。
  */
 
@@ -34,29 +34,6 @@ function getMtimeMs(p) {
     return fs.statSync(p).mtimeMs
   } catch {
     return 0
-  }
-}
-
-function readVerifyLast(workspaceRoot, requirementId) {
-  const candidates = []
-  if (requirementId) {
-    candidates.push(path.join(workspaceRoot, 'ai-docs', requirementId, '.temp', 'verify-last.json'))
-  }
-  // 兼容历史路径：旧版本写在 ai-docs/.temp
-  candidates.push(path.join(workspaceRoot, 'ai-docs', '.temp', 'verify-last.json'))
-  const p = candidates.find((item) => fs.existsSync(item))
-  if (!p) return { failedTestsCount: 0, ok: true }
-  try {
-    const j = JSON.parse(fs.readFileSync(p, UTF8))
-    const n =
-      typeof j.failedTestsCount === 'number' && Number.isFinite(j.failedTestsCount)
-        ? Math.trunc(j.failedTestsCount)
-        : j.ok === false
-          ? 1
-          : 0
-    return { failedTestsCount: Math.max(0, Math.min(99, n)), ok: j.ok !== false }
-  } catch {
-    return { failedTestsCount: 0, ok: true }
   }
 }
 
@@ -170,16 +147,12 @@ function syncResidualToState(requirementDir, workspaceRoot, gates, options) {
     ac = computeSpecifyAcceptanceResidual(safeRead(specifyPath))
   }
 
-  const requirementId = path.basename(path.resolve(requirementDir))
-  const verifySnap = readVerifyLast(workspaceRoot, requirementId)
-  const failedTestsCount = verifySnap.ok ? 0 : Math.max(1, verifySnap.failedTestsCount || 1)
-
   const openGatesCount = computeOpenGatesCount(g)
   const missingEvidencesCount = Math.min(999, Math.max(0, g.readyForQACount || 0))
 
   const rawResidual = {
     unmetAcCount: ac.remaining,
-    failedTestsCount,
+    failedTestsCount: 0,
     openGatesCount,
     missingEvidencesCount,
     totalScore: 0,
@@ -237,7 +210,6 @@ function syncResidualToState(requirementDir, workspaceRoot, gates, options) {
 
 module.exports = {
   syncResidualToState,
-  readVerifyLast,
   computeOpenGatesCount,
   buildMinimalGatesFromFiles,
 }

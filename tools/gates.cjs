@@ -79,7 +79,31 @@ const GATE_DEFINITIONS = {
     required: true,
     snapshotRequired: true,
   },
+  'implement.completion_packet_ready': {
+    stage: 'Implement',
+    scope: 'group',
+    kind: 'artifact',
+    required: true,
+  },
+  'qa.lite_evidence_ready': {
+    stage: 'QA',
+    scope: 'group',
+    kind: 'artifact',
+    required: true,
+  },
   'archive.user_anchor': {
+    stage: 'Archive',
+    scope: 'requirement',
+    kind: 'ack',
+    required: true,
+  },
+  'archive.domain_merged': {
+    stage: 'Archive',
+    scope: 'requirement',
+    kind: 'artifact',
+    required: true,
+  },
+  'archive.knowledge_reviewed': {
     stage: 'Archive',
     scope: 'requirement',
     kind: 'ack',

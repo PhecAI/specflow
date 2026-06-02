@@ -119,6 +119,10 @@ function renderNodeShallow(node) {
   return lines.join('\n')
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 // ── 动态内容提取（Group / Feature ID 仍使用标题正则，不引入锚点）──
 
 /**
@@ -541,9 +545,44 @@ function isSpecifyCompleteFromTree(tree) {
 
 // ── Focus 构建器 ────────────────────────────────────────────────────
 
+function groupHasSelfContainedContext(groupText) {
+  const labels = [
+    /(?:^|\n)\s*(?:[-*]\s*)?\*\*Goal\*\*\s*[:：]/i,
+    /(?:^|\n)\s*(?:[-*]\s*)?\*\*User AC\*\*\s*[:：]/i,
+    /(?:^|\n)\s*(?:[-*]\s*)?\*\*Local Contract\*\*\s*[:：]/i,
+    /(?:^|\n)\s*(?:[-*]\s*)?\*\*Test Strategy\*\*\s*[:：]/i,
+  ]
+  return labels.every((re) => re.test(groupText))
+}
+
+function extractRelevantExecutionLog(tree, activeGroupId) {
+  const logSection = findByKey(tree, 'executionLog')
+  if (!logSection) return ''
+
+  const rendered = renderNode(logSection)
+  const lines = rendered.split('\n')
+  const groupRe = new RegExp(escapeRegExp(activeGroupId), 'i')
+  const kept = []
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!groupRe.test(lines[i])) continue
+
+    const start = Math.max(0, i - 1)
+    const end = Math.min(lines.length, i + 4)
+    for (let j = start; j < end; j++) {
+      if (kept[kept.length - 1] !== lines[j]) kept.push(lines[j])
+    }
+    if (end < lines.length) kept.push('')
+  }
+
+  const body = kept.join('\n').trim()
+  return body ? `## Recent Execution Log\n\n${body}` : ''
+}
+
 /**
  * 为 Implement/QA 子代理构建精简版 Plan 上下文（基于 AST）。
- * 按 activeGroupId 关联提取 Scope、Architecture、Contract、Feature 详情、任务列表、Log。
+ * 新版 Task Group 自带 User AC / Local Contract / Test Strategy 时，优先只下发自足 Group。
+ * 旧版 plan 缺少自足字段时，保留 Architecture / Contract / Related Features 兼容路径。
  */
 function buildFocusPlanFromTree(tree, activeGroupId) {
   if (!tree || !activeGroupId) return null
@@ -559,6 +598,25 @@ function buildFocusPlanFromTree(tree, activeGroupId) {
   } else if (tree.content.length > 0) {
     const scope = tree.content.join('\n').trim()
     if (scope) parts.push(scope)
+  }
+
+  // 1. 定位 Active Group
+  const roadmapSection = findByKey(tree, 'roadmap')
+  if (!roadmapSection) return null
+
+  const activeGroup = roadmapSection.children.find((n) => {
+    const gid = parseGroupId(n.title)
+    return gid && gid.id === activeGroupId
+  })
+  if (!activeGroup) return null
+
+  const groupText = renderNode(activeGroup)
+
+  if (groupHasSelfContainedContext(groupText)) {
+    parts.push('## Active Task Group\n\n' + groupText)
+    const relevantLog = extractRelevantExecutionLog(tree, activeGroupId)
+    if (relevantLog) parts.push(relevantLog)
+    return parts.filter(Boolean).join('\n\n---\n\n')
   }
 
   // 追加 Architecture & Tech Stack
@@ -583,18 +641,7 @@ function buildFocusPlanFromTree(tree, activeGroupId) {
     }
   }
 
-  // 3. 定位 Active Group
-  const roadmapSection = findByKey(tree, 'roadmap')
-  if (!roadmapSection) return null
-
-  const activeGroup = roadmapSection.children.find((n) => {
-    const gid = parseGroupId(n.title)
-    return gid && gid.id === activeGroupId
-  })
-  if (!activeGroup) return null
-
   // 4. 从 Group 任务行提取关联 Feature ID
-  const groupText = renderNode(activeGroup)
   const relatedFeatureIds = new Set()
   const fidRegex = /\|\s*(F-\d+)/g
   let fm

@@ -69,6 +69,7 @@ function buildSingleProtocolText(payload, headingSuffix, dataRef) {
   const contextSummary = Object.entries({
     context: payload.context,
     mode: payload.mode,
+    qaMode: payload.qaMode,
   })
     .filter(([, v]) => v != null)
     .map(([k, v]) => `${k}: ${v}`)
@@ -279,7 +280,7 @@ try {
     const r = st.residual
     console.log('\n### 结构化残差 (residual)\n')
     console.log(
-      `- totalScore: ${r.totalScore}（AC 未闭环 ${r.unmetAcCount} | verify 未过 ${r.failedTestsCount} | 门禁 ${r.openGatesCount} | 待验收证据 ${r.missingEvidencesCount}）`,
+      `- totalScore: ${r.totalScore}（AC 未闭环 ${r.unmetAcCount} | 局部验证失败 ${r.failedTestsCount} | 门禁 ${r.openGatesCount} | 待验收证据 ${r.missingEvidencesCount}）`,
     )
     if (Array.isArray(st.metricsHistory) && st.metricsHistory.length > 0) {
       const last = st.metricsHistory[st.metricsHistory.length - 1]

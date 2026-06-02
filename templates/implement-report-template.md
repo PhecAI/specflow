@@ -1,25 +1,29 @@
-## 🏁 Group 完成汇报: [Group ID]
+## Group 完成汇报: [Group ID]
 
 ### 1. 任务进度
 - [x] 已完成: [Task ID 列表]
 - [!] 异常/阻塞: [如有请注明，需同步至 plan.md Log 区]
 
-### 2. 质量自检证明 (Runtime Check)
-- **验证命令**: `[例如: npm run test:unit / 脚本运行通过]`
-- **运行时输出**: 
-  > [AI 必须在此粘贴真实的终端 Log 片段，证明关键逻辑已运行]
-- **边界覆盖**: [例如: 已处理空数组输入、已校验 API 超时场景]
-- **运行时表现**: [例如: 无 Console Error, 内存占用正常]
-- **契约一致性自检**: 
-  - [x] 变量名/枚举值已与 plan.md 的 Contract 保持 100% 一致。
+### 2. Completion Packet 摘要
+- **Changed Files**: [关键文件与改动]
+- **AC Mapping**: [AC -> 文件/符号/行为证据]
+- **Local Contract Mapping**: [契约项 -> 落点 -> 一致性结论]
+- **Test Strategy Execution**: [按 Verification Contract 执行或说明 Deferred]
+- **Verification Matrix**:
+  - Static Diagnostics: [scope -> evidence/pass/deferred]
+  - Targeted Test: [scope -> evidence/pass/deferred]
+  - Contract Check: [scope -> evidence/pass]
+  - Smoke Evidence: [scope -> evidence/pass/deferred]
+- **Not Run / Deferred**: [未执行项 -> 原因 -> 承接方式]
+- **Knowledge Rules Used**: [采用知识规则 -> 落点]
 
 ### 3. 核心变更摘要
 - **关联功能**: [F-xx]
-- **满足 AC**: [AC ID] (已通过 [测试方式] 验证)
+- **满足 AC**: [AC ID] ([证据摘要])
 - **关键变更**: [一句话描述核心代码变动]
 
-### 4. 待确认事项 (如有)
-- [ ] [问题描述] (已回写至 Section 1)
+### 4. 待确认事项
+- [ ] [问题描述，若无则写“无”]
 
 ---
-**请 Review 代码差异。输入 "Continue" 继续，或提出修改意见。**
+请 Review 代码差异。输入 "Continue" 继续，或提出修改意见。

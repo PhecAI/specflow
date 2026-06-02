@@ -5,8 +5,8 @@
  *
  * Actions:
  *   get              — 输出当前 state JSON
- *   set-archive-anchor  — 设置 archiveAnchorDone: true（用户主动确认归档后调用）
- *   clear-archive-anchor — 删除 archiveAnchorDone 属性（归档完成后调用）
+ *   set-archive-anchor  — 写入 archive.user_anchor gate（用户主动确认归档后调用；state 镜像仅兼容旧流程）
+ *   clear-archive-anchor — 清理归档兼容 state 并阻断 Archive gates
  *   set-code-style-explored — 兼容旧流程；当前主流程不再用它作为 Plan 前门禁
  *   set-active-group <groupId> [--auto] — 设置当前活跃的 Group ID；**--auto** 开启自动托管（`autoProceedGroups=true`，后续 Group 边界免 confirm）；不带 --auto 会清除自动托管
  *   mark-task <taskId> <status> [evidence] — 变更 plan.md 中指定任务的状态（含转换校验与日志）
@@ -15,7 +15,7 @@
  *     当 status=completed 时，必须传入 evidence（验收证据摘要，如测试路径或输出摘要），否则拒绝
  *   mark-group <groupId> <status> [evidence] — 以 Group 为单位批量变更状态（闭环推荐）
  *     status: ready-for-qa | failed | completed
- *     ready-for-qa: 批量 pending/failed -> ready-for-qa（只执行一次 verify）
+ *     ready-for-qa: 批量 pending/failed -> ready-for-qa（只执行一次门禁校验）
  *     failed/completed: 批量 ready-for-qa -> failed/completed
  *     当 status=completed 时，必须传入 evidence
  *   clear-resource-failed [url] — 从 .temp/resource-load-failed.json 的失败映射中移除：指定 url 则只删该 key；不传 url 则清空整个文件
@@ -33,7 +33,6 @@
 
 const fs = require('fs')
 const path = require('path')
-const { spawnSync } = require('child_process')
 const { readState, writeState, mergeState, normalizeDomainInitRef } = require('./specflow-state.cjs')
 const {
   passGate,
@@ -42,7 +41,7 @@ const {
   fileSnapshot,
 } = require('./gates.cjs')
 const { syncResidualToState } = require('./residual-metrics.cjs')
-const { parseMarkdownTree, findByKey, renderNode } = require('./plan-parser.cjs')
+const { parseMarkdownTree, findByKey, renderNode, parseGroupsFromTree } = require('./plan-parser.cjs')
 const {
   normalizeCodingPatchSection,
   normalizeCodingPatchContent,
@@ -77,6 +76,7 @@ const ACTIONS = [
 /** 状态标记与 Markdown checkbox 的映射 */
 const STATUS_TO_MARKER = { pending: ' ', 'ready-for-qa': '?', failed: '!', completed: 'x' }
 const MARKER_TO_STATUS = { ' ': 'pending', '?': 'ready-for-qa', '!': 'failed', x: 'completed' }
+const ROADMAP_STATUS_OVERVIEW_ANCHOR = '<!-- specflow:roadmap-status-overview -->'
 
 /** 合法的状态转换规则 */
 const VALID_TRANSITIONS = {
@@ -84,6 +84,86 @@ const VALID_TRANSITIONS = {
   'ready-for-qa': ['completed', 'failed'],
   failed: ['ready-for-qa'],
   completed: [],
+}
+
+function deriveGroupDisplayStatus(counts) {
+  const pending = counts.pending || 0
+  const readyForQA = counts.readyForQA || 0
+  const failed = counts.failed || 0
+  const completed = counts.completed || 0
+  const total = pending + readyForQA + failed + completed
+
+  if (total === 0) return '无任务'
+  if (failed > 0) return '需修复'
+  if (pending === 0 && failed === 0 && readyForQA > 0) return '待验收'
+  if (pending > 0 || readyForQA > 0) return '进行中'
+  return '已完成'
+}
+
+function renderRoadmapStatusOverview(content) {
+  let groups = []
+  try {
+    const tree = parseMarkdownTree(content)
+    groups = parseGroupsFromTree(tree)
+  } catch (_) {
+    groups = []
+  }
+
+  const totals = { pending: 0, readyForQA: 0, failed: 0, completed: 0 }
+  const rows = groups.map((group) => {
+    const counts = group.counts || {}
+    totals.pending += counts.pending || 0
+    totals.readyForQA += counts.readyForQA || 0
+    totals.failed += counts.failed || 0
+    totals.completed += counts.completed || 0
+    const label = group.name ? `${group.id}: ${group.name}` : group.id
+    return `| ${label} | ${deriveGroupDisplayStatus(counts)} | ${counts.pending || 0} | ${counts.readyForQA || 0} | ${counts.failed || 0} | ${counts.completed || 0} |`
+  })
+
+  if (groups.length > 1) {
+    rows.push(
+      `| Total | ${deriveGroupDisplayStatus(totals)} | ${totals.pending} | ${totals.readyForQA} | ${totals.failed} | ${totals.completed} |`,
+    )
+  }
+  if (rows.length === 0) {
+    rows.push('| - | 无任务 | 0 | 0 | 0 | 0 |')
+  }
+
+  return [
+    '### Roadmap Status Overview',
+    ROADMAP_STATUS_OVERVIEW_ANCHOR,
+    '',
+    '| Group | 状态 | 待开发 | 待验收 | 需修复 | 已完成 |',
+    '|-------|------|--------|--------|--------|--------|',
+    ...rows,
+    '',
+  ].join('\n')
+}
+
+function syncRoadmapStatusOverview(content) {
+  const overview = renderRoadmapStatusOverview(content)
+  const existingRe =
+    /^### Roadmap Status Overview\s*\n<!-- specflow:roadmap-status-overview -->[\s\S]*?(?=^###\s+(?:📦\s*)?Group\s+\w+|^###\s+🏁|^##\s+5\.|$)/m
+
+  if (existingRe.test(content)) {
+    return content.replace(existingRe, overview)
+  }
+
+  const firstGroup = content.match(/^###\s+(?:📦\s*)?Group\s+\w+.*$/m)
+  if (firstGroup && typeof firstGroup.index === 'number') {
+    return `${content.slice(0, firstGroup.index)}${overview}\n${content.slice(firstGroup.index)}`
+  }
+
+  const roadmapAnchor = '<!-- specflow:section=roadmap -->'
+  const anchorIndex = content.indexOf(roadmapAnchor)
+  if (anchorIndex >= 0) {
+    const insertAt = content.indexOf('\n', anchorIndex + roadmapAnchor.length)
+    if (insertAt >= 0) {
+      return `${content.slice(0, insertAt + 1)}\n${overview}\n${content.slice(insertAt + 1)}`
+    }
+  }
+
+  return content
 }
 
 function fail(error) {
@@ -104,33 +184,6 @@ function resolveDir(workspaceRoot, requirementId) {
     fail(`需求目录不存在: ${dir}`)
   }
   return dir
-}
-
-function runQualityGateBeforeQA(workspaceRoot, requirementId) {
-  const verifyScript = path.join(__dirname, 'verify.cjs')
-  const customCommand = (process.env.SPECFLOW_VERIFY_COMMAND || '').trim()
-  const args = [verifyScript, workspaceRoot]
-  if (requirementId) {
-    args.push('--requirement-id', requirementId)
-  }
-  if (customCommand) {
-    args.push('--command', customCommand)
-  }
-  const result = spawnSync(process.execPath, args, { encoding: 'utf-8' })
-  if (result.status !== 0) {
-    return { ok: false, error: result.stderr || result.stdout || 'verify 执行失败' }
-  }
-  try {
-    const json = JSON.parse(result.stdout || '{}')
-    if (json.ok === true) return { ok: true, verify: json }
-    return {
-      ok: false,
-      error: json.suggestion || json.stderr || '代码规范校验未通过',
-      verify: json,
-    }
-  } catch (e) {
-    return { ok: false, error: `verify 输出解析失败: ${e.message || e}` }
-  }
 }
 
 function safeReadJson(filePath, fallback) {
@@ -410,6 +463,120 @@ function extractGroupTasksFromPlan(content, groupId) {
   return null
 }
 
+function findTaskGroupIdFromPlan(content, taskId) {
+  const tree = parseMarkdownTree(content)
+  const roadmap = findByKey(tree, 'roadmap')
+  if (!roadmap) return ''
+
+  for (const node of roadmap.children || []) {
+    const gid = ((node.title.match(/(Group\s+\w+)/i) || [])[1] || '').trim()
+    if (!gid) continue
+    const groupText = renderNode(node)
+    const escapedId = String(taskId || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const taskRegex = new RegExp(`^\\s*-\\s+\\[[\\s?!x]\\]\\s+\\*\\*${escapedId}\\*\\*`, 'm')
+    if (taskRegex.test(groupText)) return gid
+  }
+  return ''
+}
+
+function extractCompletionPacket(content, groupId) {
+  const text = String(content || '')
+  const gid = String(groupId || '').trim()
+  if (!gid) return ''
+
+  const escapedGroup = gid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(
+    `####\\s+Completion Packet\\s+[—-]\\s+${escapedGroup}\\b([\\s\\S]*?)(?=\\n#{2,6}\\s|\\n####\\s+Completion Packet\\s+[—-]\\s+Group\\s+\\w+\\b|$)`,
+    'i',
+  )
+  const match = text.match(re)
+  return match ? match[0] : ''
+}
+
+function validateCompletionPacket(content, groupId) {
+  const packet = extractCompletionPacket(content, groupId)
+  const required = [
+    { id: 'Changed Files', re: /\*\*Changed Files\*\*/i },
+    { id: 'AC Mapping', re: /\*\*AC Mapping\*\*/i },
+    { id: 'Local Contract Mapping', re: /\*\*Local Contract Mapping\*\*/i },
+    { id: 'Test Strategy Execution', re: /\*\*Test Strategy Execution\*\*/i },
+    { id: 'Verification Matrix', re: /\*\*Verification Matrix\*\*/i },
+    { id: 'Verification Matrix / Static Diagnostics', re: /Static Diagnostics\s*:/i },
+    { id: 'Verification Matrix / Targeted Test', re: /Targeted Test\s*:/i },
+    { id: 'Verification Matrix / Contract Check', re: /Contract Check\s*:/i },
+    { id: 'Verification Matrix / Smoke Evidence', re: /Smoke Evidence\s*:/i },
+    { id: 'Not Run / Deferred', re: /\*\*Not Run(?:\s*\/\s*Deferred)?\*\*/i },
+    { id: 'Knowledge Rules Used', re: /\*\*Knowledge Rules Used\*\*/i },
+  ]
+  const missing = required.filter((x) => !x.re.test(packet)).map((x) => x.id)
+  return {
+    ok: Boolean(packet) && missing.length === 0,
+    packet,
+    missing,
+    error: !packet
+      ? `缺少 Completion Packet — ${groupId}`
+      : `Completion Packet — ${groupId} 缺少小节: ${missing.join(', ')}`,
+  }
+}
+
+function validateQaLiteEvidence(content, evidence, groupId) {
+  const combined = `${String(evidence || '')}\n${String(content || '')}`
+  const gid = String(groupId || '').trim()
+  const nearGroup = !gid || new RegExp(gid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(combined)
+  const packetResult = gid ? validateCompletionPacket(content, gid) : { ok: true, missing: [] }
+  const checks = [
+    { id: 'QA Lite', re: /QA\s*Lite/i },
+    { id: 'Packet', re: /Packet|Completion Packet/i },
+    { id: 'AC', re: /\bAC\b|AC Mapping/i },
+    { id: 'Contract', re: /Contract|Local Contract/i },
+    { id: 'Test Strategy', re: /Test Strategy|测试策略/i },
+    { id: 'Verification Matrix', re: /Verification Matrix|验证矩阵/i },
+  ]
+  const missing = checks.filter((x) => !x.re.test(combined)).map((x) => x.id)
+  if (!packetResult.ok) {
+    missing.push(...packetResult.missing.map((x) => `Packet ${x}`))
+  }
+  return {
+    ok: nearGroup && packetResult.ok && missing.length === 0,
+    missing: nearGroup ? missing : ['Group ID', ...missing],
+    error: nearGroup
+      ? `QA Lite Evidence 缺少核对摘要: ${missing.join(', ')}`
+      : `QA Lite Evidence 未关联 Group: ${gid}`,
+  }
+}
+
+function enforceCompletionPacketGate(dir, content, groupId) {
+  const result = validateCompletionPacket(content, groupId)
+  if (!result.ok) {
+    blockGate(dir, 'implement.completion_packet_ready', {
+      subject: groupId,
+      reason: result.error,
+      evidence: result.missing.length > 0 ? `missing: ${result.missing.join(', ')}` : result.error,
+    })
+    fail(`${result.error}。请先在 plan.md Log 中写入完整 Completion Packet，再标记 ready-for-qa。`)
+  }
+  ensureGateResult(passGate(dir, 'implement.completion_packet_ready', {
+    subject: groupId,
+    evidence: `Completion Packet ready: ${groupId}`,
+  }))
+}
+
+function enforceQaLiteEvidenceGate(dir, content, evidence, groupId) {
+  const result = validateQaLiteEvidence(content, evidence, groupId)
+  if (!result.ok) {
+    blockGate(dir, 'qa.lite_evidence_ready', {
+      subject: groupId,
+      reason: result.error,
+      evidence: result.missing.length > 0 ? `missing: ${result.missing.join(', ')}` : result.error,
+    })
+    fail(`${result.error}。请先写入 QA Lite Evidence，再标记 completed。`)
+  }
+  ensureGateResult(passGate(dir, 'qa.lite_evidence_ready', {
+    subject: groupId,
+    evidence: `QA Lite Evidence ready: ${groupId}`,
+  }))
+}
+
 function applyTaskStatus(content, taskId, targetStatus) {
   const escapedId = taskId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const taskRegex = new RegExp(`^(\\s*-\\s+)\\[([\\s?!x])\\](\\s+\\*\\*${escapedId}\\*\\*)`, 'm')
@@ -504,6 +671,18 @@ function main() {
         subject: 'physical archive confirmation',
         reason: 'archive anchor cleared',
       }))
+      ensureGateResult(blockGate(dir, 'archive.domain_merged', {
+        stage: 'Archive',
+        scope: 'requirement',
+        subject: 'domain knowledge merge',
+        reason: 'archive anchor cleared',
+      }))
+      ensureGateResult(blockGate(dir, 'archive.knowledge_reviewed', {
+        stage: 'Archive',
+        scope: 'requirement',
+        subject: 'knowledge patch review',
+        reason: 'archive anchor cleared',
+      }))
       console.log(JSON.stringify({ ok: true }, null, 2))
       break
     }
@@ -516,6 +695,15 @@ function main() {
       fs.mkdirSync(reqTempDir, { recursive: true })
       fs.writeFileSync(patchPath, JSON.stringify(mergedPatch, null, 2), 'utf-8')
       mergeState(dir, { domainMerged: true })
+      ensureGateResult(passGate(dir, 'archive.domain_merged', {
+        stage: 'Archive',
+        scope: 'requirement',
+        subject: 'domain knowledge merge',
+        evidence: [
+          `knowledge patch merged: ${mergedPatch.length}`,
+          `business domain extracted: ${fromDomains.length}`,
+        ],
+      }))
       console.log(
         JSON.stringify(
           {
@@ -534,6 +722,12 @@ function main() {
     }
     case 'set-knowledge-reviewed': {
       mergeState(dir, { knowledgeReviewed: true })
+      ensureGateResult(passGate(dir, 'archive.knowledge_reviewed', {
+        stage: 'Archive',
+        scope: 'requirement',
+        subject: 'knowledge patch review',
+        evidence: 'knowledge and code-style patches reviewed',
+      }))
       console.log(JSON.stringify({ ok: true }, null, 2))
       break
     }
@@ -848,22 +1042,21 @@ function main() {
         break
       }
 
-      // 4.5 ready-for-qa 质量门禁：始终执行 verify（项目根配置优先，其次自动探测）
-      let verifyPayload = null
+      // ready-for-qa 只执行结构门禁：Completion Packet / Verification Matrix 必须完整。
       let codingPatch = null
       if (targetStatus === 'ready-for-qa') {
+        const groupId = findTaskGroupIdFromPlan(content, taskId)
+        enforceCompletionPacketGate(dir, content, groupId || taskId)
         codingPatch = ensureCodingStandardPatch(workspaceRoot, requirementId, content)
-        const gate = runQualityGateBeforeQA(workspaceRoot, requirementId)
-        if (!gate.ok) {
-          fail(`质量门禁未通过：${gate.error}`)
-        }
-        verifyPayload = gate.verify || null
       } else if (targetStatus === 'failed') {
         codingPatch = appendCodingStandardPatchFromFailure(workspaceRoot, requirementId, evidence, rawContent)
+      } else if (targetStatus === 'completed') {
+        const groupId = findTaskGroupIdFromPlan(content, taskId)
+        enforceQaLiteEvidenceGate(dir, content, evidence, groupId || taskId)
       }
 
       const patched = applyTaskStatus(content, taskId, targetStatus)
-      content = patched.content
+      content = syncRoadmapStatusOverview(patched.content)
       fs.writeFileSync(planPath, content, 'utf-8')
 
       try {
@@ -885,7 +1078,6 @@ function main() {
             taskId,
             from: currentStatus,
             to: targetStatus,
-            verify: verifyPayload,
             codingPatch,
           },
           null,
@@ -933,17 +1125,14 @@ function main() {
         break
       }
 
-      let verifyPayload = null
       let codingPatch = null
       if (targetStatus === 'ready-for-qa') {
+        enforceCompletionPacketGate(dir, rawContent, groupId)
         codingPatch = ensureCodingStandardPatch(workspaceRoot, requirementId, rawContent)
-        const gate = runQualityGateBeforeQA(workspaceRoot, requirementId)
-        if (!gate.ok) {
-          fail(`质量门禁未通过：${gate.error}`)
-        }
-        verifyPayload = gate.verify || null
       } else if (targetStatus === 'failed') {
         codingPatch = appendCodingStandardPatchFromFailure(workspaceRoot, requirementId, evidence, rawContent)
+      } else if (targetStatus === 'completed') {
+        enforceQaLiteEvidenceGate(dir, rawContent, evidence, groupId)
       }
 
       let content = rawContent
@@ -953,6 +1142,7 @@ function main() {
         content = patched.content
         if (patched.changed) changedTasks.push(task.taskId)
       }
+      content = syncRoadmapStatusOverview(content)
       fs.writeFileSync(planPath, content, 'utf-8')
 
       try {
@@ -973,7 +1163,6 @@ function main() {
             to: targetStatus,
             matchedTasks: selected.length,
             changedTasks,
-            verify: verifyPayload,
             codingPatch,
           },
           null,

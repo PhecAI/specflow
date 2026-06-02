@@ -125,7 +125,11 @@ node "$PLUGIN_ROOT/tools/gates.cjs" reset \
 - `init.domain_refs`
 - `plan.readiness_review`
 - `plan.user_confirm_start`
+- `implement.completion_packet_ready`
+- `qa.lite_evidence_ready`
 - `archive.user_anchor`
+- `archive.domain_merged`
+- `archive.knowledge_reviewed`
 
 门禁契约：
 - gate id 必须注册在 `tools/gates.cjs` 的 `GATE_DEFINITIONS`。
@@ -133,6 +137,8 @@ node "$PLUGIN_ROOT/tools/gates.cjs" reset \
 - `passed` 必须包含 evidence。
 - `blocked` 必须包含 reason。
 - 标记为 `snapshotRequired` 的 gate 在 `passed` / `blocked` 时必须包含 snapshot。
+- `implement.completion_packet_ready` 与 `qa.lite_evidence_ready` 由 `manage-state.cjs mark-group/mark-task` 在状态转换前自动判定；不要手工 pass/block 这两类运行门禁。
+- Archive 阶段以 `archive.*` gates 作为调度真相源；`specflow-state.json` 中的同名兼容字段不会绕过归档门禁。
 
 ## sync-document.cjs
 
@@ -167,17 +173,6 @@ node "$PLUGIN_ROOT/tools/merge-global-assets.cjs" \
 
 # 兼容位置参数
 node "$PLUGIN_ROOT/tools/merge-global-assets.cjs" [workspaceRoot] <需求号> [--allow-prearchive]
-```
-
-## verify.cjs
-
-```bash
-PLUGIN_ROOT=/path/to/specflow
-node "$PLUGIN_ROOT/tools/verify.cjs" \
-  --workspace <workspaceRoot> [--requirement-id <需求号>] [--command "pnpm run lint:changed"]
-
-# 兼容位置参数
-node "$PLUGIN_ROOT/tools/verify.cjs" [workspaceRoot] [--command ...] [--requirement-id ...]
 ```
 
 ## inventory-scan.cjs

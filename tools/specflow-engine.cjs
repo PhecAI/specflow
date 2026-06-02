@@ -467,7 +467,7 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
     };
   }
 
-  // 2.5 Init：领域初始化——纯 prompt 驱动，不做任何启发式扫描。
+  // 2.5 Init：领域初始化——交互确认驱动，不做任何启发式扫描。
   //   两阶段协议：
   //     S1) 尚无 confirmed 且尚无 candidates：发 1 道 text 题，
   //         由 agent 结合项目（前端路由 / 后端 domain·service）与需求摘要，
@@ -529,6 +529,7 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
               allow_multiple: false,
               responseType: 'text',
               placeholder: 'services/order::payment,apps/admin-web::content-library',
+              progressKey: 'interaction.domain_init_candidates',
               options: [],
             },
           ],
@@ -538,15 +539,35 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
       // --- S2: 已有候选 → 对「全局缺失」的逐条 yes/no；全局已有的自动列入 accept ---
       const autoAccept = candidates.filter((ref) => globalSet.has(domainRefToFileStem(ref)));
       const needConfirm = candidates.filter((ref) => !globalSet.has(domainRefToFileStem(ref)));
-      const questions = needConfirm.map((ref, idx) => ({
-        id: `domain_init_accept__${domainRefToFileStem(ref) || idx}`,
-        prompt: `是否为本次需求采纳并创建业务领域「${ref}」？（若否则丢弃该候选）`,
-        allow_multiple: false,
-        options: [
-          { id: 'yes', label: `是，采纳 ${ref}` },
-          { id: 'no', label: `否，丢弃 ${ref}` },
-        ],
-      }));
+      const questions = needConfirm.map((ref, idx) => {
+        const stem = domainRefToFileStem(ref) || String(idx);
+        const fileName = `${stem}.md`;
+        return {
+          id: `domain_init_accept__${stem}`,
+          progressKey: 'interaction.domain_init_accept',
+          progressVariables: {
+            domainRef: ref,
+            fileName,
+            domainFile: `business-domains/${fileName}`,
+          },
+          prompt: [
+            '是否为本次需求采纳并创建以下业务知识库？',
+            '',
+            '为什么需要这一步：后续需求说明、技术方案和开发都会优先参考这份业务知识库；先确认领域边界，可以避免误读同名模块或相似业务。',
+            '',
+            `领域身份：${ref}`,
+            `知识库文件：business-domains/${fileName}`,
+            '',
+            '确认后，我会只围绕这个领域边界梳理存量代码规则，再继续完善需求说明。',
+            '若否则丢弃该候选。',
+          ].join('\n'),
+          allow_multiple: false,
+          options: [
+            { id: 'yes', label: `是，创建 ${fileName}` },
+            { id: 'no', label: `否，丢弃 ${fileName}` },
+          ],
+        };
+      });
 
       return {
         type: 'interaction_required',
@@ -757,6 +778,7 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
           questions: [
             {
               id: 'confirm_start_plan',
+              progressKey: 'interaction.plan_confirm',
               prompt:
                 '需求说明已就绪，技术前置问题也已处理完。\n\n是否开始生成**技术方案**？',
               allow_multiple: false,
@@ -814,6 +836,7 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
             context: action.context,
             groupId: action.groupId,
             dependsOn: Array.isArray(action.dependsOn) ? action.dependsOn : [],
+            ...(action.qaMode ? { qaMode: action.qaMode } : {}),
             ...(action.finalQa === true ? { finalQa: true } : {}),
           })),
         };
@@ -837,6 +860,7 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
           agent: action.agent,
           context: action.context,
           groupId: action.groupId,
+          ...(action.qaMode ? { qaMode: action.qaMode } : {}),
           ...(action.finalQa === true ? { finalQa: true } : {}),
         };
       }
@@ -878,7 +902,17 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
           questions: [
             {
               id: 'confirm_start_group',
-              prompt: `${prevGroupDone}请确认是否开始 **${targetGroup.id}** 的实现流程？`,
+              progressKey: 'interaction.group_confirm',
+              progressVariables: {
+                nextGroup: targetGroup.id,
+              },
+              prompt: [
+                prevGroupDone.trim(),
+                '',
+                `接下来要进入 **${targetGroup.id}**。技术方案已把工作拆成任务组，这一步是确认是否开始当前组的开发与验收。`,
+                '',
+                '你可以只开始当前组，也可以选择自动托管，让后续任务组在完成一个后继续推进。',
+              ].join('\n'),
               allow_multiple: false,
               options: [
                 { id: 'confirm', label: `确认，开始执行 ${targetGroup.id}` },
@@ -923,6 +957,7 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
           questions: [
             {
               id: 'retry_limit_exceeded',
+              progressKey: 'interaction.retry_limit_exceeded',
               prompt: `QA 连续 ${gates.groupRetryCount} 次验证失败，似乎陷入了死循环。请人工介入或选择后续策略：`,
               allow_multiple: false,
               options: [
@@ -948,22 +983,23 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
     }
     if (readyForQAInGroup > 0) {
       // isFinalQA：全局 pending/failed 为 0，且全局 ready-for-qa 全在当前 Group。
-      // 为真时 QA 需要执行"阶段 B 收口"（一次 tsc --noEmit + plan 里 Final Gate 白名单）。
-      // 并行模式下多 Group 同时到 [?] 时每个 Group 都不挂 FinalQA，等缩减到单个 Group 再触发，避免重复 tsc。
+      // 为真时 QA 需要执行"阶段 B 收口"（仅执行本项目已证明安全的 Final Gate 验证）。
+      // 并行模式下多 Group 同时到 [?] 时每个 Group 都不挂 FinalQA，等缩减到单个 Group 再触发，避免重复收口。
       const isFinalQA =
         gates.pendingTaskCount === 0 &&
         gates.failedTaskCount === 0 &&
         gates.readyForQACount === readyForQAInGroup;
       const baseContext = `当前 Group (${targetGroup.id}) 存在 ${readyForQAInGroup} 个待验收任务（[?]），请执行 QA 验证`;
       const finalHint =
-        '\n\n[FinalQA=true] 本批验收通过后 Roadmap 将全绿。请在"阶段 A 最小验证"的基础上追加一次"阶段 B 收口"：' +
-        'tsc --noEmit + plan.md 中 Final Gate 标注的回归 spec 白名单（若 plan 未给出则省略，并在 QA Log 注明）。' +
-        '两段只执行一次，禁止回跑项目级或模块级 vitest。';
+        '\n\n[FinalQA=true] 本批验收通过后 Roadmap 将全绿。请在"阶段 A QA Lite"的基础上追加一次"阶段 B 收口"：' +
+        '仅执行 Final Gate / Verification Contract 中已证明安全的局部收口验证；无法安全本地执行的全量回归写明 CI/manual 承接。' +
+        '两段只执行一次，禁止回跑范围不明的项目级或模块级验证。';
       return {
         type: 'dispatch',
         agent: 'specflow-qa',
         context: isFinalQA ? baseContext + finalHint : baseContext,
         finalQa: isFinalQA === true,
+        qaMode: 'lite',
       };
     }
     return {
@@ -994,7 +1030,7 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
       };
     }
 
-    // 以下所有步骤只在用户已触发 set-archive-anchor（archiveAnchorDone=true）后执行。
+    // 以下所有步骤只在用户已触发 set-archive-anchor（archive.user_anchor=passed）后执行。
     // Step 1: 确保领域知识已被提取和合并（正向归档）
     if (!gates.domainMerged && !inHistory) {
       return {
@@ -1049,10 +1085,9 @@ function countBlockers(content) {
   return m ? m.length : 0;
 }
 
-/** 归档前人工确认：由 manage-state set-archive-anchor 写入 archiveAnchorDone */
-function isArchiveAnchorAllowed(dir) {
-  const s = readState(dir);
-  return s.archiveAnchorDone === true;
+/** 归档前人工确认：由 manage-state set-archive-anchor 写入 archive.user_anchor gate */
+function isArchiveAnchorAllowed(registryOrDir) {
+  return gatePassed(registryOrDir, 'archive.user_anchor');
 }
 
 // parseClarification / isSpecifyComplete 已迁移至 plan-parser.cjs（AST + 锚点解析）
@@ -1338,6 +1373,8 @@ function scoreKnowledgeChunk(name, content, hintTokens) {
  * 自动托管（autoProceedGroups=true）下的 per-group 快照派发：
  * - 按每个 Group 当前状态派发 `specflow-implement`（含 Bug Fix 模式）或 `specflow-qa`，
  *   不同 Group 可以**同时**出现不同 agent（例如 A 已经到 [?] 派 QA，B 仍在 [ ] 派 implement）。
+ * - 并发能力保留为自动托管下的高级模式，默认用户确认模式不启用；每批最多 2 个 Group，
+ *   避免调度管理成本吞掉并行收益。
  * - per-group 的"implement→QA→fix→QA"闭环**由编排技能在 parent 层**按引擎下一轮的快照推进，
  *   而不是再引入一层中间子代理。
  */
@@ -1434,20 +1471,21 @@ function analyzeParallelGroupActions(planTree, globalCounts) {
         g.pending === 0 && g.failed === 0 && g.readyForQA === readyForQA;
       const baseContext = `当前 Group (${id}) 存在 ${readyForQA} 个待验收任务（[?]），请执行 QA 验证`;
       const finalHint =
-        '\n\n[FinalQA=true] 本批验收通过后 Roadmap 将全绿。请在"阶段 A 最小验证"的基础上追加一次"阶段 B 收口"：' +
-        'tsc --noEmit + plan.md 中 Final Gate 标注的回归 spec 白名单（若 plan 未给出则省略，并在 QA Log 注明）。' +
-        '两段只执行一次，禁止回跑项目级或模块级 vitest。';
+        '\n\n[FinalQA=true] 本批验收通过后 Roadmap 将全绿。请在"阶段 A QA Lite"的基础上追加一次"阶段 B 收口"：' +
+        '仅执行 Final Gate / Verification Contract 中已证明安全的局部收口验证；无法安全本地执行的全量回归写明 CI/manual 承接。' +
+        '两段只执行一次，禁止回跑范围不明的项目级或模块级验证。';
       actions.push({
         groupId: id,
         agent: 'specflow-qa',
         context: isFinalQA ? baseContext + finalHint : baseContext,
         finalQa: isFinalQA === true,
+        qaMode: 'lite',
         dependsOn,
       });
     }
   }
   actions.sort((a, b) => a.groupId.localeCompare(b.groupId));
-  return actions.slice(0, 4);
+  return actions.slice(0, 2);
 }
 
 function listDomainDocs(workspaceRoot) {
@@ -2358,6 +2396,8 @@ function runEngineInner(workspaceRoot, requirementId) {
     gatePassed(gateRegistry, 'plan.user_confirm_start', {
       snapshot: specifySnapshot,
     });
+  const archiveDomainMergedGateValid = gatePassed(gateRegistry, 'archive.domain_merged');
+  const archiveKnowledgeReviewedGateValid = gatePassed(gateRegistry, 'archive.knowledge_reviewed');
   const effectiveSpecifyReviewValid =
     specifyReviewValid || planReadinessGateValid;
   const effectiveAckSpecifyBeforePlan =
@@ -2451,8 +2491,8 @@ function runEngineInner(workspaceRoot, requirementId) {
     activeGroupId, // 传递给 determineAction
     groupRetryCount: state.groupRetryCount || 0,
     autoProceedGroups: state.autoProceedGroups || false,
-    domainMerged: state.domainMerged || false,
-    knowledgeReviewed: state.knowledgeReviewed || false,
+    domainMerged: archiveDomainMergedGateValid,
+    knowledgeReviewed: archiveKnowledgeReviewedGateValid,
     codeStyleExplored: state.codeStyleExplored === true,
     codeStyleExploredMtime:
       typeof state.codeStyleExploredMtime === 'number'
@@ -2486,7 +2526,7 @@ function runEngineInner(workspaceRoot, requirementId) {
     !inHistory &&
     phase === 'Archive' &&
     canProceedToArchive &&
-    !isArchiveAnchorAllowed(dir);
+    !isArchiveAnchorAllowed(gateRegistry);
 
   const suggestedAction = determineAction(
     gates,
@@ -2553,6 +2593,7 @@ function runEngineInner(workspaceRoot, requirementId) {
         context: action.context,
         focusPlan: focusPlan,
         dependsOn: Array.isArray(action.dependsOn) ? action.dependsOn : [],
+        ...(action.qaMode ? { qaMode: action.qaMode } : {}),
         ...(action.finalQa === true ? { finalQa: true } : {}),
       });
     }
@@ -2654,6 +2695,7 @@ function runEngineInner(workspaceRoot, requirementId) {
             }
           : null,
         mode: suggestedAction.mode,
+        qaMode: suggestedAction.qaMode || null,
         focusPlan: suggestedAction.focusPlan || null,
         focusSpecify: suggestedAction.focusSpecify || null,
         focusArchive: suggestedAction.focusArchive || null,

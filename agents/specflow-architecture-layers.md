@@ -22,7 +22,7 @@ model: inherit
 
 优先读取：
 
-- `package.json`、`tsconfig*`、构建配置、框架配置、路由配置。
+- 项目清单、构建配置、框架配置、路由/入口配置等。
 - `src/`、`packages/`、`apps/`、`lib/` 等一级结构。
 - 典型文件：页面/入口、组件、组合式逻辑、API client、store/model、测试、mock、类型定义等。
 - 既有 `ai-docs/global-assets/standards/code-style.md`，只用于理解已有规范中的 layer 名或 applies，不复制内容。

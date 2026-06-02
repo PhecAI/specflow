@@ -117,7 +117,8 @@ function main() {
         2,
       ),
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   if (!requirementId) {
@@ -131,7 +132,8 @@ function main() {
         2,
       ),
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   const scriptDir = __dirname;
@@ -151,10 +153,12 @@ function main() {
         encoding: 'utf-8',
       });
       if (rendered.stdout) process.stdout.write(rendered.stdout);
-      process.exit(code);
+      process.exitCode = code;
+      return;
     }
     if (stdout) process.stdout.write(stdout);
-    process.exit(code);
+    process.exitCode = code;
+    return;
   }
 
   // mode === 'change'：先同步文档，再刷新引擎状态
@@ -184,7 +188,8 @@ function main() {
       raw: syncResult.stdout || '',
     };
     console.log(JSON.stringify(errorPayload, null, 2));
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   const engineResult = runNodeScript(enginePath, [
@@ -212,7 +217,7 @@ function main() {
   }
 
   console.log(JSON.stringify(output, null, 2));
-  process.exit(engineResult.code);
+  process.exitCode = engineResult.code;
 }
 
 if (require.main === module) {

@@ -37,26 +37,26 @@ description: Use when the orchestrator dispatches specflow-plan or the requireme
 2. 读取 `focusSpecify`；筛选 `knowledgeContext`。
 3. 写 §1：Goal、技术非目标、已确认技术决策、目录、红线、SOP。
 4. 写 §2：Mock 表（如需）+ 常量/Domain + 联调替换清单。
-5. 写 §3：Feature 映射（要点 + Test Scope，不重复 Roadmap）。
-6. 写 §4：Group/Task + Step/Verify + Spec 覆盖自检。
+5. 写 §3：Feature 映射（要点 + Verification Intent，不重复 Roadmap）。
+6. 写 §4：Task Group 作为执行单元；每组内联 Goal / Depends on / User AC / Local Contract / Files / Test Strategy / Group Verify / Task Step+Verify。
 7. 自检可读性与引擎锚点。
 
 ## 与 Superpowers 对齐（仍在一份 plan 内）
 
 - §1 ≈ design 的「背景/非目标/决策/目录」
 - §2 Mock 表 ≈ design 的「Mock API」
-- §4 Task 的 Step/Verify ≈ plan 的可执行步骤
+- §4 Task Group 的自足上下文 + Task Step/Verify ≈ plan 的可执行步骤
 - 不拆第二份文件；Specify 仍只承载产品规格
 
 ## 反模式
 
 - Mock 未授权却写满 `[待确认]` 契约。
 - Feature 与 Roadmap 重复粘贴。
-- 只有任务名、没有 Run/Expected。
+- 只有任务名、没有 Local Contract / Test Strategy / Verify。
 - 在 plan 里改产品口径。
 
 ## 自检
 
-- Implement 不读 specify 也能知道改哪些文件、跑什么命令。
+- Implement 不读 specify 也能从当前 Task Group 知道用户验收、局部契约、改哪些文件、执行哪些最小验证。
 - Mock 场景 §2.1 可独立支撑 Group A/B。
 - 模板锚点完整；Task ID 兼容 mark-task。

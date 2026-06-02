@@ -34,6 +34,7 @@ const {
   deriveConfidenceStatus,
 } = require('./domain-knowledge.cjs')
 const { normalizeDomainInitRef, domainRefToFileStem } = require('./specflow-state.cjs')
+const { gatePassed } = require('./gates.cjs')
 
 const UTF8 = 'utf-8'
 
@@ -145,9 +146,17 @@ function normalizeDomainName(raw) {
 
 function canMergeAtCurrentStage(workspaceRoot, requirementId, options = {}) {
   if (options.allowPreArchive === true) return { ok: true }
+  const reqDir = path.join(workspaceRoot, 'ai-docs', requirementId)
+  if (gatePassed(reqDir, 'archive.user_anchor')) return { ok: true }
   const statePath = path.join(workspaceRoot, 'ai-docs', requirementId, '.temp', 'specflow-state.json')
   const state = safeReadJson(statePath, {})
-  if (state && state.archiveAnchorDone === true) return { ok: true }
+  if (state && state.archiveAnchorDone === true) {
+    return {
+      ok: false,
+      error:
+        '归档确认仍停留在旧 state 字段，禁止提前执行全局合并。请先通过归档确认门禁后再由 archive 流程统一合并。',
+    }
+  }
   return {
     ok: false,
     error:

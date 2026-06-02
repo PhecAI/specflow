@@ -37,7 +37,6 @@ const {
 const { readState } = require(path.join(__dirname, '..', 'tools', 'specflow-state.cjs'));
 const SYNC_DOCUMENT = path.join(__dirname, '..', 'tools', 'sync-document.cjs');
 const ARCHIVE = path.join(__dirname, '..', 'tools', 'archive.cjs');
-const VERIFY = path.join(__dirname, '..', 'tools', 'verify.cjs');
 const MERGE_GLOBAL_ASSETS = path.join(
   __dirname,
   '..',
@@ -45,6 +44,10 @@ const MERGE_GLOBAL_ASSETS = path.join(
   'merge-global-assets.cjs'
 );
 const INVENTORY_SCAN = path.join(__dirname, '..', 'tools', 'inventory-scan.cjs');
+const {
+  parseMarkdownTree,
+  buildFocusPlanFromTree,
+} = require(path.join(__dirname, '..', 'tools', 'plan-parser.cjs'));
 const {
   passGate,
   blockGate,
@@ -83,6 +86,56 @@ function writeCalibratedArchitectureLayers(ws, requirementId) {
   passGate(reqDir, 'init.architecture_layers', {
     evidence: 'test calibrated architecture layers',
   });
+}
+
+function completionPacketFor(groupId = 'Group A') {
+  return [
+    '',
+    `#### Completion Packet — ${groupId}`,
+    '- **Changed Files**:',
+    '  - `src/a.ts`: implemented symbol',
+    '- **AC Mapping**:',
+    '  - AC main -> `src/a.ts:doThing` -> implemented',
+    '- **Local Contract Mapping**:',
+    '  - API field -> `src/a.ts:doThing` -> aligned',
+    '- **Test Strategy Execution**:',
+    '  - TDD Units: none',
+    '  - Unit/Component Checks: Implement executed targeted unit checks',
+    '  - Mock Smoke: none',
+    '  - Static Diagnostics: changed files checked by project-scoped evidence',
+    '- **Verification Matrix**:',
+    '  - Static Diagnostics: changed files -> evidence recorded -> pass',
+    '  - Targeted Test: not applicable -> deferred to QA/CI',
+    '  - Contract Check: Local Contract mapping -> evidence recorded -> pass',
+    '  - Smoke Evidence: not applicable -> deferred to manual/CI',
+    '- **Not Run / Deferred**:',
+    '  - none -> not applicable -> QA',
+    '- **Knowledge Rules Used**:',
+    '  - none -> not applicable',
+  ].join('\n');
+}
+
+function planWithCompletionPacket(roadmapText, groupId = 'Group A', extraGroups = '') {
+  return `${planWithRoadmap(roadmapText, extraGroups)}\n${completionPacketFor(groupId)}\n`;
+}
+
+function withoutVerificationMatrix(text) {
+  return text.replace(
+    /\n- \*\*Verification Matrix\*\*:[\s\S]*?(?=\n- \*\*Not Run \/ Deferred\*\*:)/,
+    ''
+  );
+}
+
+function qaLiteEvidence(groupId = 'Group A') {
+  return [
+    `${groupId}`,
+    'Mode: QA Lite',
+    'Completion Packet checked',
+    'AC Mapping checked',
+    'Local Contract checked',
+    'Test Strategy checked',
+    'Verification Matrix checked',
+  ].join(' | ');
 }
 
 describe('specflow-engine.cjs', () => {
@@ -147,7 +200,7 @@ describe('specflow-engine.cjs', () => {
     assert.strictEqual(j.suggestedAction.questions[j.suggestedAction.questions.length - 1].responseType, 'text');
   });
 
-  it('领域初始化两阶段 prompt 驱动：S1 text 题 → S2 N 道 yes/no → dispatch_array 派发多 domain → specify', () => {
+  it('领域初始化两阶段交互确认：S1 text 题 → S2 N 道 yes/no → dispatch_array 派发多 domain → specify', () => {
     const ws = mkWorkspace();
     writeCalibratedArchitectureLayers(ws, 'new-user-req');
 
@@ -179,6 +232,14 @@ describe('specflow-engine.cjs', () => {
     assert.strictEqual(qs.length, 2);
     assert.strictEqual(qs[0].id, 'domain_init_accept__services__pay__payment');
     assert.strictEqual(qs[1].id, 'domain_init_accept__services__order__order');
+    assert.strictEqual(qs[0].progressKey, 'interaction.domain_init_accept');
+    assert.strictEqual(qs[0].progressVariables.domainFile, 'business-domains/services__pay__payment.md');
+    assert.match(qs[0].prompt, /为什么需要这一步/);
+    assert.match(qs[0].prompt, /知识库文件：business-domains\/services__pay__payment\.md/);
+    assert.strictEqual(j.userFacing.progress.progressKey, 'interaction.domain_init_accept');
+    assert.strictEqual(j.userFacing.progress.goal, '确认是否创建候选业务知识库');
+    assert.strictEqual(j.userFacing.progress.llm.mode, 'compose_guidance_from_progress_model');
+    assert.match(j.userFacing.fallbackMessage, /这一步会做/);
     assert.deepStrictEqual(j.suggestedAction.init_context.needConfirm, ['services/pay::payment', 'services/order::order']);
     assert.deepStrictEqual(j.suggestedAction.init_context.autoAcceptFromGlobal, []);
 
@@ -487,8 +548,12 @@ describe('specflow-engine.cjs', () => {
       q.prompt,
       '需求说明已就绪，技术前置问题也已处理完。\n\n是否开始生成**技术方案**？',
     );
+    assert.strictEqual(q.progressKey, 'interaction.plan_confirm');
     assert.strictEqual(j.userFacing.templateId, 'orchestration.plan_confirm');
-    assert.match(j.userFacing.fallbackMessage, /需求说明已就绪，技术前置问题也已处理完/);
+    assert.strictEqual(j.userFacing.progress.progressKey, 'interaction.plan_confirm');
+    assert.strictEqual(j.userFacing.progress.goal, '确认是否开始技术方案');
+    assert.strictEqual(j.userFacing.progress.llm.mode, 'compose_guidance_from_progress_model');
+    assert.match(j.userFacing.fallbackMessage, /这一步会做/);
   });
 
   it('Plan：确认生成 plan 会清理旧 Group 授权，生成 plan 后仍需选择执行方式', () => {
@@ -836,9 +901,7 @@ describe('specflow-engine.cjs', () => {
 
   it('Implement：autoProceed=true 下连续 mark-task（含 plan.md mtime 前进）不清授权、不弹 confirm_start_group', () => {
     const ws = mkWorkspace();
-    const plan = 
-      planWithRoadmap('- [ ] **T-A1** | 任务1 | F-01 |\n- [ ] **T-A2** | 任务2 | F-01 |')
-    ;
+    const plan = planWithCompletionPacket('- [ ] **T-A1** | 任务1 | F-01 |\n- [ ] **T-A2** | 任务2 | F-01 |');
     writeWorkspace(ws, 'R1', {
       specify: specifyComplete(),
       plan,
@@ -853,7 +916,7 @@ describe('specflow-engine.cjs', () => {
     // 模拟 implement 子代理连续更新 plan.md（mtime 前进多次）
     const r1 = runManageState(ws, 'R1', 'mark-task', ['T-A1', 'ready-for-qa']);
     assert.strictEqual(r1.status, 0, r1.stderr);
-    const r2 = runManageState(ws, 'R1', 'mark-task', ['T-A1', 'completed', '验证证据：test/a.test.ts']);
+    const r2 = runManageState(ws, 'R1', 'mark-task', ['T-A1', 'completed', qaLiteEvidence()]);
     assert.strictEqual(r2.status, 0, r2.stderr);
 
     // 额外手动推一次 mtime，模拟非 mark-* 路径的写入（如 Log 段追加）
@@ -935,6 +998,8 @@ describe('specflow-engine.cjs', () => {
     // 模拟用户主动触发归档
     const r = runManageState(ws, 'R1', 'set-archive-anchor');
     assert.strictEqual(r.status, 0, r.stderr);
+    const gates = readGates(path.join(ws, 'ai-docs', 'R1'));
+    assert.strictEqual(gates.gates['archive.user_anchor'].status, 'passed');
 
     // 再跑：进入合并链第一步
     const j2 = parseEngineJson(runEngine(ws, 'R1').stdout);
@@ -981,6 +1046,20 @@ describe('specflow-engine.cjs', () => {
     const j = parseEngineJson(runEngine(ws, 'R1').stdout);
     assert.strictEqual(j.suggestedAction.type, 'dispatch');
     assert.strictEqual(j.suggestedAction.agent, 'specflow-archive');
+  });
+
+  it('Archive：旧 state 标记不再绕过 archive.user_anchor gate', () => {
+    const ws = mkWorkspace();
+    writeWorkspace(ws, 'R1', {
+      specify: specifyComplete(),
+      plan: planAllCompleted(),
+      state: { stateVersion: 1, archiveAnchorDone: true },
+    });
+    const reqDir = path.join(ws, 'ai-docs', 'R1');
+    fs.unlinkSync(path.join(reqDir, '.temp', 'gates.json'));
+    const j = parseEngineJson(runEngine(ws, 'R1').stdout);
+    assert.strictEqual(j.phase, 'Archive');
+    assert.strictEqual(j.suggestedAction.type, 'anchor');
   });
 
   it('Archive（history 路径）：跳过领域合并，直接派发归档', () => {
@@ -1147,6 +1226,7 @@ describe('orchestrator.cjs', () => {
     // Group B 仍 pending，Group A QA 本批不应触发 FinalQA
     const qaA = agents.find((a) => a.groupId === 'Group A' && a.agent === 'specflow-qa');
     assert.ok(qaA);
+    assert.strictEqual(qaA.qaMode, 'lite');
     assert.notStrictEqual(qaA.finalQa, true);
     assert.ok(!String(qaA.context || '').includes('[FinalQA=true]'));
   });
@@ -1176,6 +1256,7 @@ describe('orchestrator.cjs', () => {
     const qaActions = agents.filter((a) => a.agent === 'specflow-qa');
     assert.ok(qaActions.length >= 2);
     for (const a of qaActions) {
+      assert.strictEqual(a.qaMode, 'lite');
       assert.notStrictEqual(a.finalQa, true, `${a.groupId} 不应挂 finalQa`);
       assert.ok(!String(a.context || '').includes('[FinalQA=true]'));
     }
@@ -1206,6 +1287,7 @@ describe('orchestrator.cjs', () => {
     assert.strictEqual(j.suggestedAction.type, 'dispatch');
     assert.strictEqual(j.suggestedAction.agent, 'specflow-qa');
     assert.strictEqual(j.suggestedAction.groupId, 'Group B');
+    assert.strictEqual(j.suggestedAction.qaMode, 'lite');
     assert.strictEqual(j.suggestedAction.finalQa, true);
     assert.ok(String(j.suggestedAction.context).includes('[FinalQA=true]'));
   });
@@ -1234,6 +1316,62 @@ describe('orchestrator.cjs', () => {
     const j = parseEngineJson(r.stdout);
     assert.strictEqual(j.suggestedAction.type, 'dispatch');
     assert.strictEqual(j.suggestedAction.agent, 'specflow-implement');
+  });
+});
+
+describe('plan-parser focusPlan', () => {
+  it('自足 Task Group 只下发本组上下文，不再携带全局 Contract/Feature 大块', () => {
+    const plan = [
+      '# Plan R1',
+      '',
+      '## 1. Architecture',
+      '<!-- specflow:section=architecture -->',
+      'GLOBAL ARCHITECTURE SHOULD NOT LEAK',
+      '',
+      '## 2. Technical Contracts',
+      '<!-- specflow:section=contract -->',
+      'GLOBAL CONTRACT SHOULD NOT LEAK',
+      '',
+      '## 3. Feature & Design',
+      '<!-- specflow:section=feature -->',
+      '### [F-01] Global Feature',
+      'GLOBAL FEATURE SHOULD NOT LEAK',
+      '',
+      '## 4. Roadmap',
+      '<!-- specflow:section=roadmap -->',
+      '### Group A: 自足执行单元',
+      '- **Goal**: 完成用户列表筛选',
+      '- **Depends on**: none',
+      '- **User AC**:',
+      '  - AC-01 支持按用户名筛选',
+      '- **Local Contract**:',
+      '  - `GET /api/users?name=` returns `{ items: User[] }`',
+      '- **Files**:',
+      '  - Modify: `src/users/api.ts`',
+      '- **Test Strategy**:',
+      '  - TDD Units: `src/users/api.spec.ts`',
+      '  - Unit/Component Checks: none',
+      '  - Mock Smoke: mock `GET /api/users` and verify query param',
+      '  - Static Diagnostics: changed files evidence',
+      '- **Group Verify**: Red/Green/Refactor + mock smoke + contract evidence',
+      '- [ ] **T-A1 [TDD]** | 用户筛选 API | Ref: F-01 | Step: Red → Green → Refactor | Verify: `src/users/api.spec.ts`',
+      '',
+      '## 5. Execution Log',
+      '<!-- specflow:section=execution-log -->',
+      '- Group A: previous attempt summary',
+      '- Group B: unrelated summary',
+    ].join('\n')
+
+    const focusPlan = buildFocusPlanFromTree(parseMarkdownTree(plan), 'Group A')
+
+    assert.ok(focusPlan.includes('## Active Task Group'))
+    assert.ok(focusPlan.includes('Local Contract'))
+    assert.ok(focusPlan.includes('Test Strategy'))
+    assert.ok(focusPlan.includes('GET /api/users'))
+    assert.ok(focusPlan.includes('Group A: previous attempt summary'))
+    assert.ok(!focusPlan.includes('GLOBAL ARCHITECTURE SHOULD NOT LEAK'))
+    assert.ok(!focusPlan.includes('GLOBAL CONTRACT SHOULD NOT LEAK'))
+    assert.ok(!focusPlan.includes('GLOBAL FEATURE SHOULD NOT LEAK'))
   });
 });
 
@@ -1460,25 +1598,6 @@ describe('knowledge loop solution', () => {
     assert.ok(!Object.prototype.hasOwnProperty.call(metadata.services__order__payment, 'author'), '不再保留兼容字段 author');
   });
 
-  it('verify 会输出 code-style 语义检查提示', () => {
-    const ws = mkWorkspace();
-    fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'standards'), { recursive: true });
-    fs.writeFileSync(
-      path.join(ws, 'ai-docs', 'global-assets', 'standards', 'code-style.md'),
-      '# Code Style\n- 函数命名使用动词开头\n- 避免 any',
-      'utf8'
-    );
-
-    const r = spawnSync(process.execPath, [VERIFY, ws, '--command', 'node -e "process.exit(0)"'], {
-      encoding: 'utf8',
-    });
-    assert.strictEqual(r.status, 0, r.stderr);
-    const j = JSON.parse(r.stdout);
-    assert.strictEqual(j.ok, true);
-    assert.ok(Array.isArray(j.codeStyleHints));
-    assert.ok(j.codeStyleHints.length > 0);
-  });
-
   it('orchestrator change 默认会触发 --extract 并生成 patch 文件', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
@@ -1539,82 +1658,115 @@ describe('knowledge loop solution', () => {
     assert.ok(!patchNow.some((p) => p.section === 'naming' && p.content.includes('使用语义化命名')));
   });
 
-  it('mark-task 到 ready-for-qa 时会执行质量门禁', () => {
+  it('mark-task 到 ready-for-qa 时只执行结构门禁并沉淀 code-style patch', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
     writeCalibratedArchitectureLayers(ws, reqId);
-    const plan = 
-      planWithRoadmap('- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名 (layers: ui-page)')
-    ;
+    const plan = planWithCompletionPacket(
+      '- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名 (layers: ui-page)'
+    );
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan,
       state: { stateVersion: 1, activeGroup: 'Group A' },
     });
 
-    const failGate = runManageState(
-      ws,
-      reqId,
-      'mark-task',
-      ['T-A1', 'ready-for-qa'],
-      { env: { SPECFLOW_VERIFY_COMMAND: 'node -e "process.exit(1)"' } }
-    );
-    assert.ok(failGate.status !== 0);
-
-    const passGate = runManageState(
-      ws,
-      reqId,
-      'mark-task',
-      ['T-A1', 'ready-for-qa'],
-      { env: { SPECFLOW_VERIFY_COMMAND: 'node -e "process.exit(0)"' } }
-    );
+    const passGate = runManageState(ws, reqId, 'mark-task', ['T-A1', 'ready-for-qa']);
     assert.strictEqual(passGate.status, 0, passGate.stderr);
     const j = JSON.parse(passGate.stdout);
     assert.strictEqual(j.ok, true);
     assert.strictEqual(j.to, 'ready-for-qa');
+    assert.ok(!Object.prototype.hasOwnProperty.call(j, 'verify'));
     assert.ok(fs.existsSync(path.join(ws, 'ai-docs', reqId, '.temp', 'coding-standard-patch.json')));
     const codingPatch = JSON.parse(
       fs.readFileSync(path.join(ws, 'ai-docs', reqId, '.temp', 'coding-standard-patch.json'), 'utf8')
     );
     assert.ok(Array.isArray(codingPatch));
     assert.ok(codingPatch.some((p) => p.section === 'naming'));
-    assert.ok(fs.existsSync(path.join(ws, 'ai-docs', reqId, '.temp', 'verify-last.json')));
-    assert.ok(!fs.existsSync(path.join(ws, 'ai-docs', '.temp', 'verify-last.json')));
   });
 
-  it('mark-group 到 ready-for-qa 时仅执行一次质量门禁并批量更新任务', () => {
+  it('mark-task 到 ready-for-qa 缺少 Completion Packet 时由状态机阻断', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
-    const plan = 
-      planWithRoadmap('- [ ] **T-A1** | coding | F-01 |\n- [ ] **T-A2** | coding | F-01 |')
-    ;
+    const plan = planWithRoadmap('- [ ] **T-A1** | coding | F-01 |');
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan,
       state: { stateVersion: 1, activeGroup: 'Group A' },
     });
 
-    const countFile = path.join(ws, 'verify-count.txt');
-    const verifyCmd =
-      'node -e "const fs=require(\'fs\');const p=process.env.COUNT_FILE;let n=0;try{n=Number(fs.readFileSync(p,\'utf8\'))||0}catch{};fs.writeFileSync(p,String(n+1));process.exit(0)"';
+    const r = runManageState(ws, reqId, 'mark-task', ['T-A1', 'ready-for-qa']);
+    assert.ok(r.status !== 0);
+    const out = JSON.parse(r.stdout);
+    assert.strictEqual(out.ok, false);
+    assert.ok(String(out.error).includes('Completion Packet'));
+    const gates = readGates(path.join(ws, 'ai-docs', reqId));
+    assert.strictEqual(gates.gates['implement.completion_packet_ready'].status, 'blocked');
+  });
 
-    const r = runManageState(
-      ws,
-      reqId,
-      'mark-group',
-      ['Group A', 'ready-for-qa'],
-      { env: { SPECFLOW_VERIFY_COMMAND: verifyCmd, COUNT_FILE: countFile } }
-    );
+  it('mark-group 到 ready-for-qa 时仅执行结构门禁并批量更新任务', () => {
+    const ws = mkWorkspace();
+    const reqId = 'R1';
+    const plan = planWithCompletionPacket('- [ ] **T-A1** | coding | F-01 |\n- [ ] **T-A2** | coding | F-01 |');
+    writeWorkspace(ws, reqId, {
+      specify: specifyComplete(),
+      plan,
+      state: { stateVersion: 1, activeGroup: 'Group A' },
+    });
+
+    const r = runManageState(ws, reqId, 'mark-group', ['Group A', 'ready-for-qa']);
     assert.strictEqual(r.status, 0, r.stderr);
     const j = JSON.parse(r.stdout);
     assert.strictEqual(j.ok, true);
     assert.strictEqual(j.to, 'ready-for-qa');
     assert.strictEqual(j.matchedTasks, 2);
-    assert.strictEqual(fs.readFileSync(countFile, 'utf8').trim(), '1');
+    assert.ok(!Object.prototype.hasOwnProperty.call(j, 'verify'));
 
     const planNow = fs.readFileSync(path.join(ws, 'ai-docs', reqId, 'plan.md'), 'utf8');
     assert.ok(planNow.includes('- [?] **T-A1**'));
     assert.ok(planNow.includes('- [?] **T-A2**'));
+    assert.ok(planNow.includes('### Roadmap Status Overview'));
+    assert.match(planNow, /\| Group A(?:: [^|]+)? \| 待验收 \| 0 \| 2 \| 0 \| 0 \|/);
+  });
+
+  it('mark-group 到 ready-for-qa 缺少 Completion Packet 时由状态机阻断', () => {
+    const ws = mkWorkspace();
+    const reqId = 'R1';
+    const plan = planWithRoadmap('- [ ] **T-A1** | coding | F-01 |\n- [ ] **T-A2** | coding | F-01 |');
+    writeWorkspace(ws, reqId, {
+      specify: specifyComplete(),
+      plan,
+      state: { stateVersion: 1, activeGroup: 'Group A' },
+    });
+
+    const r = runManageState(ws, reqId, 'mark-group', ['Group A', 'ready-for-qa']);
+    assert.ok(r.status !== 0);
+    const out = JSON.parse(r.stdout);
+    assert.strictEqual(out.ok, false);
+    assert.ok(String(out.error).includes('Completion Packet'));
+    const gates = readGates(path.join(ws, 'ai-docs', reqId));
+    assert.strictEqual(gates.gates['implement.completion_packet_ready'].status, 'blocked');
+  });
+
+  it('mark-group 到 ready-for-qa 缺少 Verification Matrix 时由状态机阻断', () => {
+    const ws = mkWorkspace();
+    const reqId = 'R1';
+    const plan = withoutVerificationMatrix(
+      planWithCompletionPacket('- [ ] **T-A1** | coding | F-01 |\n- [ ] **T-A2** | coding | F-01 |')
+    );
+    writeWorkspace(ws, reqId, {
+      specify: specifyComplete(),
+      plan,
+      state: { stateVersion: 1, activeGroup: 'Group A' },
+    });
+
+    const r = runManageState(ws, reqId, 'mark-group', ['Group A', 'ready-for-qa']);
+    assert.ok(r.status !== 0);
+    const out = JSON.parse(r.stdout);
+    assert.strictEqual(out.ok, false);
+    assert.ok(String(out.error).includes('Verification Matrix'));
+    const gates = readGates(path.join(ws, 'ai-docs', reqId));
+    assert.strictEqual(gates.gates['implement.completion_packet_ready'].status, 'blocked');
   });
 
   it('mark-group 可将当前组 ready-for-qa 批量标记为 failed', () => {
@@ -1639,6 +1791,7 @@ describe('knowledge loop solution', () => {
     const planNow = fs.readFileSync(path.join(ws, 'ai-docs', reqId, 'plan.md'), 'utf8');
     assert.ok(planNow.includes('- [!] **T-A1**'));
     assert.ok(planNow.includes('- [!] **T-A2**'));
+    assert.match(planNow, /\| Group A(?:: [^|]+)? \| 需修复 \| 0 \| 0 \| 2 \| 0 \|/);
   });
 
   it('mark-task failed 且 evidence 含 [CodeStyle] 时会沉淀 coding-standard-patch', () => {
@@ -1707,7 +1860,7 @@ describe('knowledge loop solution', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
     const plan = 
-      planWithRoadmap('- [?] **T-A1** | qa | F-01 |\n- [!] **T-A2** | qa | F-01 |')
+      planWithCompletionPacket('- [?] **T-A1** | qa | F-01 |\n- [!] **T-A2** | qa | F-01 |')
     ;
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
@@ -1715,7 +1868,7 @@ describe('knowledge loop solution', () => {
       state: { stateVersion: 1, activeGroup: 'Group A' },
     });
 
-    const r = runManageState(ws, reqId, 'mark-group', ['Group A', 'completed', 'qa pass evidence']);
+    const r = runManageState(ws, reqId, 'mark-group', ['Group A', 'completed', qaLiteEvidence()]);
     assert.strictEqual(r.status, 0, r.stderr);
     const j = JSON.parse(r.stdout);
     assert.strictEqual(j.ok, true);
@@ -1727,13 +1880,51 @@ describe('knowledge loop solution', () => {
     assert.ok(planNow.includes('- [!] **T-A2**'));
   });
 
+  it('mark-group completed 缺少 QA Lite Evidence 时由状态机阻断', () => {
+    const ws = mkWorkspace();
+    const reqId = 'R1';
+    const plan = planWithRoadmap('- [?] **T-A1** | qa | F-01 |');
+    writeWorkspace(ws, reqId, {
+      specify: specifyComplete(),
+      plan,
+      state: { stateVersion: 1, activeGroup: 'Group A' },
+    });
+
+    const r = runManageState(ws, reqId, 'mark-group', ['Group A', 'completed', 'qa pass evidence']);
+    assert.ok(r.status !== 0);
+    const out = JSON.parse(r.stdout);
+    assert.strictEqual(out.ok, false);
+    assert.ok(String(out.error).includes('QA Lite Evidence'));
+    const gates = readGates(path.join(ws, 'ai-docs', reqId));
+    assert.strictEqual(gates.gates['qa.lite_evidence_ready'].status, 'blocked');
+  });
+
+  it('mark-group completed 在 Completion Packet 缺少 Verification Matrix 时由 QA 门禁阻断', () => {
+    const ws = mkWorkspace();
+    const reqId = 'R1';
+    const plan = withoutVerificationMatrix(planWithCompletionPacket('- [?] **T-A1** | qa | F-01 |'));
+    writeWorkspace(ws, reqId, {
+      specify: specifyComplete(),
+      plan,
+      state: { stateVersion: 1, activeGroup: 'Group A' },
+    });
+
+    const r = runManageState(ws, reqId, 'mark-group', ['Group A', 'completed', qaLiteEvidence()]);
+    assert.ok(r.status !== 0);
+    const out = JSON.parse(r.stdout);
+    assert.strictEqual(out.ok, false);
+    assert.ok(String(out.error).includes('Verification Matrix'));
+    const gates = readGates(path.join(ws, 'ai-docs', reqId));
+    assert.strictEqual(gates.gates['qa.lite_evidence_ready'].status, 'blocked');
+  });
+
   it('mark-group 到 ready-for-qa 时会在保留历史补丁的基础上补充 plan 规范', () => {
     const ws = mkWorkspace();
     const reqId = 'R1';
     writeCalibratedArchitectureLayers(ws, reqId);
-    const plan = 
-      planWithRoadmap('- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名 (layers: ui-page)')
-    ;
+    const plan = planWithCompletionPacket(
+      '- [ ] **T-A1** | coding | F-01 |\n- [CodeStyle] naming: 使用语义化命名 (layers: ui-page)'
+    );
     writeWorkspace(ws, reqId, {
       specify: specifyComplete(),
       plan,
@@ -1747,65 +1938,13 @@ describe('knowledge loop solution', () => {
       'utf8'
     );
 
-    const r = runManageState(
-      ws,
-      reqId,
-      'mark-group',
-      ['Group A', 'ready-for-qa'],
-      { env: { SPECFLOW_VERIFY_COMMAND: 'node -e "process.exit(0)"' } }
-    );
+    const r = runManageState(ws, reqId, 'mark-group', ['Group A', 'ready-for-qa']);
     assert.strictEqual(r.status, 0, r.stderr);
     const patchNow = JSON.parse(
       fs.readFileSync(path.join(ws, 'ai-docs', reqId, '.temp', 'coding-standard-patch.json'), 'utf8')
     );
     assert.ok(patchNow.some((p) => p.section === 'naming'));
     assert.ok(patchNow.some((p) => p.section === 'legacy' && p.content === '旧规则'));
-  });
-
-  it('verify 未传 --command 时可按技术栈自动选择命令（typecheck 优先于全量 lint 占位）', () => {
-    const ws = mkWorkspace();
-    fs.writeFileSync(
-      path.join(ws, 'package.json'),
-      JSON.stringify({
-        name: 'demo',
-        private: true,
-        packageManager: 'pnpm@8.0.0',
-        // 仅留 typecheck；禁止全量 lint 硬约束下，lint 脚本即使存在也不会被挂载
-        scripts: {
-          lint: 'node -e "process.exit(0)"',
-          typecheck: 'node -e "process.exit(0)"',
-        },
-      }),
-      'utf8'
-    );
-    const r = spawnSync(process.execPath, [VERIFY, ws], { encoding: 'utf8' });
-    assert.strictEqual(r.status, 0, r.stderr);
-    const j = JSON.parse(r.stdout);
-    assert.strictEqual(j.ok, true);
-    assert.ok(Array.isArray(j.autoDetectedCommands));
-    assert.ok(j.autoDetectedCommands.length > 0);
-    assert.ok(String(j.selectedCommand).includes('typecheck'));
-    assert.ok(!String(j.selectedCommand).includes(' lint')); // 绝不落到全量 lint
-  });
-
-  it('verify 对仅有 scripts.lint（全量）且无 eslint 配置的工程：拒绝挂载 lint，退到 noop 占位', () => {
-    const ws = mkWorkspace();
-    fs.writeFileSync(
-      path.join(ws, 'package.json'),
-      JSON.stringify({
-        name: 'demo',
-        private: true,
-        packageManager: 'pnpm@8.0.0',
-        scripts: { lint: 'node -e "process.exit(0)"' },
-      }),
-      'utf8'
-    );
-    const r = spawnSync(process.execPath, [VERIFY, ws], { encoding: 'utf8' });
-    assert.strictEqual(r.status, 0, r.stderr);
-    const j = JSON.parse(r.stdout);
-    assert.strictEqual(j.ok, true);
-    assert.ok(!String(j.selectedCommand).includes('lint')); // 硬约束：禁止全量 lint fallback
-    assert.ok(String(j.selectedCommand).includes('process.exit(0)')); // 仅挂 noop 占位
   });
 
   it('知识注入会优先返回与当前任务更相关的 domain', () => {
@@ -1878,99 +2017,6 @@ describe('knowledge loop solution', () => {
     assert.ok(!ctx.includes('全局库存规则'));
   });
 
-  it('verify 在项目根存在 eslint 配置且缺少 lint:changed 时不会回退全量 lint', () => {
-    const ws = mkWorkspace();
-    fs.writeFileSync(
-      path.join(ws, '.eslintrc.json'),
-      '{"root":true}',
-      'utf8'
-    );
-    fs.writeFileSync(
-      path.join(ws, 'package.json'),
-      JSON.stringify({
-        name: 'demo',
-        private: true,
-        packageManager: 'pnpm@8.0.0',
-        scripts: { lint: 'node -e "process.exit(0)"', typecheck: 'node -e "process.exit(0)"' },
-      }),
-      'utf8'
-    );
-
-    const r = spawnSync(process.execPath, [VERIFY, ws], { encoding: 'utf8' });
-    assert.strictEqual(r.status, 0, r.stderr);
-    const j = JSON.parse(r.stdout);
-    assert.strictEqual(j.ok, true);
-    assert.ok(j.lintRulesDetected && j.lintRulesDetected.eslint === true);
-    assert.ok(!String(j.selectedCommand).includes('lint'));
-    assert.ok(String(j.selectedCommand).includes('typecheck'));
-  });
-
-  it('verify 在项目根存在 eslint 配置且提供 lint:changed 时优先选择增量 lint', () => {
-    const ws = mkWorkspace();
-    fs.writeFileSync(
-      path.join(ws, '.eslintrc.json'),
-      '{"root":true}',
-      'utf8'
-    );
-    fs.writeFileSync(
-      path.join(ws, 'package.json'),
-      JSON.stringify({
-        name: 'demo',
-        private: true,
-        packageManager: 'pnpm@8.0.0',
-        scripts: {
-          lint: 'node -e "process.exit(0)"',
-          'lint:changed': 'node -e "process.exit(0)"',
-          typecheck: 'node -e "process.exit(0)"',
-        },
-      }),
-      'utf8'
-    );
-
-    const r = spawnSync(process.execPath, [VERIFY, ws], { encoding: 'utf8' });
-    assert.strictEqual(r.status, 0, r.stderr);
-    const j = JSON.parse(r.stdout);
-    assert.strictEqual(j.ok, true);
-    assert.ok(j.lintRulesDetected && j.lintRulesDetected.eslint === true);
-    assert.ok(String(j.selectedCommand).includes('lint:changed'));
-  });
-
-  it('verify 会解析 standards/code-style.md 的 [Hard] 规则并要求存在可执行映射', () => {
-    const ws = mkWorkspace();
-    fs.mkdirSync(path.join(ws, 'ai-docs', 'global-assets', 'standards'), { recursive: true });
-    fs.writeFileSync(
-      path.join(ws, 'ai-docs', 'global-assets', 'standards', 'code-style.md'),
-      `# Code Style
-
-> **规范编号**：STYLE-0001
-> **适用上下文**：src/**/*.ts
-> **正例/反例**：
-> \`\`\`ts
-> // ok
-> \`\`\`
-> **验证方式**：command: node -e "process.exit(0)"
-
-> **规范编号**：STYLE-0002
-> **适用上下文**：src/**/*.ts
-> **正例/反例**：
-> \`\`\`ts
-> // bad
-> \`\`\`
-> **验证方式**：regex: /^use.*Hook/
-
-[Hard] STYLE-0001: 必须通过静态检查
-[Hard] STYLE-0002: hook 命名规则
-`,
-      'utf8'
-    );
-
-    const r = spawnSync(process.execPath, [VERIFY, ws], { encoding: 'utf8' });
-    assert.strictEqual(r.status, 0, r.stderr);
-    const j = JSON.parse(r.stdout);
-    assert.strictEqual(j.ok, true);
-    assert.ok(Array.isArray(j.hardRules) && j.hardRules.length >= 2);
-    assert.ok(j.hardRules.every((x) => x.verify && x.verify.type), 'Hard 规则必须有 verify 映射');
-  });
 });
 
 describe('archive knowledge reviewer gate', () => {

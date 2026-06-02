@@ -8,10 +8,11 @@
  * - autoProceedGroups: 由 set-active-group --auto 写入；为 true 时引擎在 Group 边界**静默对齐** activeGroup（免 confirm_start_group），直至 Roadmap 全部完成或用户通过 `set-active-group <id>`（不带 --auto）显式退出托管。
  * - planAckMtime: **已弃用**（保留 schema 仅为向后兼容旧 state 文件；当前版本的引擎与 manage-state 不再读写此字段）。
  * - groupRetryCount: QA 失败重试计数（死循环熔断）
- * - domainMerged: 归档前领域文档是否已由 domain-explorer 合并
+ * - domainMerged: 兼容旧流程；新门禁写入 `.temp/gates.json` 的 `archive.domain_merged`
  * - codeStyleExplored: 兼容旧状态；当前主流程不再把 code-style explorer 作为 Plan 前门禁
  * - codeStyleExploredMtime: 兼容旧状态；旧流程记录 specify.md mtime（ms）
- * - archiveAnchorDone: 用户是否已确认执行物理归档
+ * - archiveAnchorDone: 兼容旧流程；新门禁写入 `.temp/gates.json` 的 `archive.user_anchor`
+ * - knowledgeReviewed: 兼容旧流程；新门禁写入 `.temp/gates.json` 的 `archive.knowledge_reviewed`
  * - ackSpecifyBeforePlan / specifyAckMtime: 兼容旧流程；新门禁写入 `.temp/gates.json` 的 `plan.user_confirm_start`
  * - specifyReviewStatus / specifyReviewMtime / specifyReviewPassedMtime / specifyReviewBlockReason / specifyReviewContractEvidence:
  *   兼容旧流程；新门禁写入 `.temp/gates.json` 的 `plan.readiness_review`

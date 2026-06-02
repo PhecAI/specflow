@@ -202,6 +202,22 @@ function writeRequirementDir(reqDir, { specify, plan, state, resourceFailed }) {
     const temp = path.join(reqDir, '.temp');
     fs.mkdirSync(temp, { recursive: true });
     fs.writeFileSync(path.join(temp, 'specflow-state.json'), JSON.stringify(state, null, 2), 'utf8');
+    const { passGate } = require('../tools/gates.cjs');
+    if (state.archiveAnchorDone === true) {
+      passGate(reqDir, 'archive.user_anchor', {
+        evidence: 'fixture archive anchor confirmed',
+      });
+    }
+    if (state.domainMerged === true) {
+      passGate(reqDir, 'archive.domain_merged', {
+        evidence: 'fixture domain knowledge merged',
+      });
+    }
+    if (state.knowledgeReviewed === true) {
+      passGate(reqDir, 'archive.knowledge_reviewed', {
+        evidence: 'fixture knowledge reviewed',
+      });
+    }
   }
   if (resourceFailed != null) {
     const temp = path.join(reqDir, '.temp');

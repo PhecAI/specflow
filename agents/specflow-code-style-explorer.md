@@ -12,7 +12,7 @@ model: inherit
 
 ## 概念定义（最重要，违反即作废）
 
-**代码规范（Code Style / SOP）** = **"某类文件/某一分层应该怎么写"的横切规则**，类似 Cursor Rules、ESLint 规则、架构守护；**与具体业务功能点无关**。把需求换成另一个，规则仍然成立。
+**代码规范（Code Style / SOP）** = **"某类文件/某一分层应该怎么写"的横切规则**，类似 Cursor Rules、项目静态规则、架构守护；**与具体业务功能点无关**。把需求换成另一个，规则仍然成立。
 
 **架构分层（Architecture Layer）** = 当前项目中稳定存在的代码职责边界，例如某项目可能叫 Controller / Service / Repository，另一个项目可能叫 Page / Composition / Domain。**SpecFlow 不硬编码分层名称**；分层必须由 agent 基于项目目录、配置、既有代码与既有规范生成并维护在 `ai-docs/global-assets/standards/architecture-layers.md`。
 
@@ -37,7 +37,7 @@ model: inherit
 
 1. ☐ 与具体业务字段名/枚举值/功能点**完全无关**？
 2. ☐ 同类型文件（不管承载什么业务）都应遵守？
-3. ☐ 可通过 **ESLint/stylelint/ast-grep/rg/tsc/CI 脚本** 机械验证（[Hard]）或人工 PR review 机械化核对（[Soft]）？
+3. ☐ 可通过**项目已有机械验证器、静态查询、局部脚本或 CI 规则**验证（[Hard]）或人工 PR review 机械化核对（[Soft]）？
 4. ☐ 把"需求号 8822"换成"需求号 9999"后该规则仍成立？
 5. ☐ 规则描述的是**"文件该怎么写"**而非**"需求要做什么"**？
 
@@ -53,7 +53,7 @@ model: inherit
 - **SOP Not Feature**：规则必须是"这类文件怎么写"，不是"这次需求要做什么"。
 - **Reuse First**：先在全局 `ai-docs/global-assets/standards/code-style.md` 命中已有规则；已有语义覆盖则不写入需求 code-style。
 - **Minimal Surface**：Additions/Overrides 只覆盖**真正缺失或必须收紧**的项；可不写就不写；**宁缺毋滥**。
-- **Hard 必带验证**：标记为 `[Hard]` 的规则必须给出**验证方式**（ESLint 规则名/ast-grep 模式/rg 正则/tsc flag/CI 脚本），否则降级为 `[Soft]`。
+- **Hard 必带验证**：标记为 `[Hard]` 的规则必须给出**验证方式**（项目已有机械验证器、静态查询、局部脚本或 CI 规则），否则降级为 `[Soft]`。
 - **不写实现**：不要把方案/代码片段/字段清单塞进 code-style；那是 plan 的职责。
 - **Layer First, Glob Second**：规则优先绑定 `layers`；`applies` 只是 layer 在当前项目中的路径实现细节。禁止自由发明细碎业务 glob。
 - **分层不硬编码**：不得假设项目一定有 `view.page` / `service` / `domain`；必须读取或生成本项目的 `architecture-layers.md`。
@@ -174,7 +174,7 @@ touched:
 - 规则文本里是否出现了具体业务字段/枚举值/按钮文案/业务模块名？→ 删除或泛化到"文件类型 SOP"。
 - `layers` 是否来自 architecture-layers？若否 → 先更新 layer 画像或删除该规则。
 - `applies` 是否精细到具体业务模块目录？→ 删除或改为 layer 的分层级 glob。
-- [Hard] 规则是否给出了可机械验证的手段（ESLint 规则名 / ast-grep 模式 / rg 正则 / tsc flag）？否则降级为 [Soft] 或删除。
+- [Hard] 规则是否给出了可机械验证的手段（项目已有机械验证器、静态查询、局部脚本或 CI 规则）？否则降级为 [Soft] 或删除。
 - 把"需求号 <ID>"换成另一个需求号，规则是否仍然成立？否 → 删除（这是业务规则，不是代码规范）。
 - **（唯一表述）** 本次 Additions + 全局规范中，是否存在 `section` 相同、`applies` 相同或互为子集、且**语义等价**的另一条？若是 → 不写本次增量；严禁用"换个角度再说一遍"绕过。判定可问自己：两条规则能否被同一条 lint/ast-grep 规则覆盖？若能，就是同一条。
 
@@ -194,17 +194,17 @@ touched:
 **正面示例（真正的代码规范）**：
 
 ```text
-✅ [ts-strict] **/*.ts 禁用 any；必要时使用 unknown + 类型收窄 (applies: **/*.ts)
-   验证：tsc --noImplicitAny；ESLint @typescript-eslint/no-explicit-any=error
+✅ [type-safety] 强类型文件禁止无约束的顶层逃逸类型；必要时使用安全收窄 (applies: <typed-source-layer>)
+   验证：项目已有类型规则或静态查询必须可定位违规用法
 
-✅ [vue-setup] 页面级 Vue 必须使用 <script setup lang="ts"> 并为 defineProps 声明 TS 类型 (applies: **/pages/**/*.vue, **/views/**/*.vue)
-   验证：ast-grep 规则 script[lang!=ts] / rg "defineProps\s*\(\s*\[" 不得命中
+✅ [component-contract] 页面/组件入口必须显式声明输入契约 (applies: <ui-component-layer>)
+   验证：项目已有组件规则或静态查询必须可定位缺失声明
 
-✅ [layering] Service 层不得直接调用 tt.request/axios，须经 Repository (applies: **/services/**/*.ts)
-   验证：rg -l "tt\.request\(|axios\.(get|post|put|delete)" **/services/
+✅ [layering] Service 层不得直接调用底层网络客户端，须经 Repository/Adapter (applies: <service-layer>)
+   验证：静态查询定位 service 层直接调用底层客户端的违规符号
 
-✅ [switch-exhaustive] union type 的 switch 必须穷尽或抛出 never (applies: **/*.ts)
-   验证：ESLint @typescript-eslint/switch-exhaustiveness-check=error
+✅ [branch-exhaustive] 有限状态/枚举分支必须穷尽或显式抛出不可达错误 (applies: <typed-source-layer>)
+   验证：项目已有分支穷尽规则或静态查询必须可定位缺失兜底
 ```
 
 写入 `ai-docs/<需求号>/code-style.md`，**只包含以下两段**（无内容时保留空标题）。禁止写入 Matched / Referenced 全局规则：
@@ -242,7 +242,7 @@ touched:
       "strength": "hard",
       "layers": ["<architecture-layer-id>"],
       "applies": ["src/api/**/*.ts", "src/services/**/*.ts"],
-      "verify": "rg --multiline ..."
+      "validation": "项目已有机械验证器、静态查询、局部脚本或 CI 规则"
     },
     {
       "section": "logging",

@@ -39,13 +39,13 @@
 - **Plan（无接口/字段依据）**：若规格与可引用材料中**仍无可落地**的接口与字段变更说明，`specflow-plan` **必须**生成技术澄清状态并结束本轮；**禁止**先写满 `plan.md` 再靠猜测字段与接口进入实现。用户闭合澄清后再派发 plan，结论写入 plan §1.3。
 - **Implement / Group**：`confirm_start_group` 选 **自动托管** → `set-active-group <id> --auto`（`autoProceedGroups=true`），后续 Group 边界**免确认**直至完成；仅 **确认**（不带 `--auto`）则**每个**新 Group 都弹窗。取消托管：再次 `set-active-group <id>` **不带** `--auto`。
 - **Group 确认**：`manage-state.cjs set-active-group ...` 后再跑引擎。
-- **归档锚点（Archive）**：Roadmap 全绿后，引擎**不自动**开始任何合并/归档子代理，也**不弹 AskQuestion**；而是返回 `type: 'anchor'` + `next.action: 'set-archive-anchor'` 的文字提示。理由：测试期间需求可能仍在变动，过早合并知识/代码规范会把未冻结的结论灌入全局资产。编排层见到此 anchor **只展示文字并结束本轮**；当用户下一轮明确表达归档意图（「开始归档」「确认归档」等）后，再调 `manage-state.cjs set-archive-anchor [workspaceRoot] <需求号>` 并跑引擎；后续才会依次 `dispatch`：`specflow-domain-explorer`（Merge）→ `specflow-knowledge-reviewer` → `specflow-archive`。历史需求（`inHistory=true`）跳过此锚点直接 dispatch `specflow-archive`。
+- **归档锚点（Archive）**：Roadmap 全绿后，引擎**不自动**开始任何合并/归档子代理，也**不弹 AskQuestion**；而是返回 `type: 'anchor'` + `next.action: 'set-archive-anchor'` 的文字提示。理由：测试期间需求可能仍在变动，过早合并知识/代码规范会把未冻结的结论灌入全局资产。编排层见到此 anchor **只展示文字并结束本轮**；当用户下一轮明确表达归档意图（「开始归档」「确认归档」等）后，再调 `manage-state.cjs set-archive-anchor [workspaceRoot] <需求号>` 写入 `archive.user_anchor` 并跑引擎；后续才会依次 `dispatch`：`specflow-domain-explorer`（Merge，写入 `archive.domain_merged`）→ `specflow-knowledge-reviewer`（写入 `archive.knowledge_reviewed`）→ `specflow-archive`。历史需求（`inHistory=true`）跳过此锚点直接 dispatch `specflow-archive`。
 - **资源失败**：见 `docs/troubleshooting.md` 与 `resource-load-failed.json`。
 - **业务知识库（尚无 `specify.md`）**：不再弹出旧单 slug 交互。引擎按需求内流程初始化知识库，领域身份统一为 `<scope>::<slug>`（如 `services/order::payment`），确认结果写入 `domainInitRefs`；若 `ai-docs/<需求号>/business-domains/<scope__slug>.md` 缺失时先 `dispatch specflow-domain-explorer`，完成后再 `specflow-specify`。
 
 ### 2. 行为决策
 
-真相源：业务进度以 **`specify.md` / `plan.md`** 为准；编排门闩以 **`ai-docs/<需求号>/.temp/specflow-state.json`** 为准（字段与清洗见 `specflow-state.cjs`）。
+真相源：业务进度以 **`specify.md` / `plan.md`** 为准；阶段门禁以 **`ai-docs/<需求号>/.temp/gates.json`** 为准（定义见 `tools/gates.cjs`）。`specflow-state.json` 仅保留运行态与旧字段兼容，不能绕过 gates。
 
 
 | suggestedAction.type   | 动作 |
@@ -65,7 +65,8 @@
 
 - dispatch implement/qa/domain-explorer 后，子代理返回 → **同一轮内**再跑 `specflow-engine.cjs`，直到出现停止条件。
 - `dispatch_array`（自动托管下 per-group 快照混合派发）：
-  - 数组元素按各 Group 当前快照派 `specflow-implement`（含 Bug Fix 模式）或 `specflow-qa`，同一批可混合，每个元素带 `groupId` 与独立 `focusPlan`。
+  - 数组元素按各 Group 当前快照派 `specflow-implement`（含 Bug Fix 模式）或 `specflow-qa`，同一批可混合，每个元素带 `groupId` 与独立 `focusPlan`；新版 plan 下 `focusPlan` 优先只包含当前 Task Group 的自足上下文（Goal / User AC / Local Contract / Files / Test Strategy / Log 摘要）。
+  - 这是用户选择自动托管后的高级提效模式；默认单 Group 确认不会触发。每批最多 2 个 Group。若存在 dependsOn、共享页面容器/聚合文件/Mock/API contract，应串行推进。
   - 调度遵循 `waitPolicy=any_done`：任一 Group 子代理返回后即先跑引擎，优先推进该 Group 下一步；**禁止**等待同批其他 Group 全部完成才继续。
   - **per-group 的 implement→QA→fix→QA 闭环由引擎在连续快照派发中推进**，不再引入"pipeline 中间子代理"；A/B/C 仅共享需求上下文，不存在跨 Group 完成依赖。
   - `pending-protocol.json` 为 `{ kind: 'dispatch_array', items: [...] }`；需要查看具体 Group 的 focusPlan/上下文时：`node print-protocol.cjs ... --group <GroupId>`。
@@ -74,6 +75,11 @@
 ### 4. 任务状态机
 
 Roadmap 任务复选框通过 `manage-state.cjs` 变更：**优先 `mark-group` 进行 Group 闭环**（整组送测/通过/失败），仅在同组混合结果等特殊场景回退 `mark-task`。详见 `tools/README.md`。
+
+状态推进必须经过机器校验：
+- `pending/failed -> ready-for-qa`：`manage-state` 先校验 `implement.completion_packet_ready`，要求当前 Group 的 Completion Packet 完整；否则命令失败并写 `gates.json: blocked`。
+- `ready-for-qa -> completed`：`manage-state` 先校验 `qa.lite_evidence_ready`，要求 Evidence 覆盖 QA Lite / Packet / AC / Contract / Test Strategy；否则命令失败并写 `gates.json: blocked`。
+- 任何代理都不得手工编辑 checkbox 或用自然语言确认替代上述脚本；流程稳定性以 `specflow-engine.cjs + manage-state.cjs + gates.cjs` 为准。
 
 ### 5. 特殊流程
 

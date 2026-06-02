@@ -102,15 +102,25 @@ node "$PLUGIN_ROOT/tools/manage-state.cjs" mark-specify-review-blocked [workspac
 **§3 Feature Breakdown**
 
 - 每个 specify 功能切片至少一个 `[F-xx]`。
-- **Design** 限 3–5 条要点；**Test Scope** 标明 `[TDD]` 与否。
+- **Design** 限 3–5 条要点；**Verification Intent** 只写测试/验证候选，不写执行步骤。
+- `[TDD]` 只作为审计标签，不承担测试设计；真实执行方式必须在 §4 Task Group 的 **Test Strategy** 中闭合。
 - Ref 用 `specify §3.x` + 验收要点**自然语言摘要**；避免 `AC-3.1-01~05` 编号墙。
 
 **§4 Implementation Roadmap**
 
-- Group 顺序执行；每组有 **Goal** + **Group Verify**（`Run` / `Expected`）。
+- 保留 **Task Group** 作为唯一执行单元；不要引入 Slice 等新概念。
+- 每个 Task Group 必须是 LLM 可直接执行的自足信息集合，包含 **Goal / Depends on / User AC / Local Contract / Files / Test Strategy / Verification Contract / Group Verify**。
+- **Local Contract** 从 §2 摘取本组最小必要 API / DTO / 枚举 / 权限 / 常量；不得只写 `Ref: F-xx` 让 Implement 自行跨章节拼图。
+- **Test Strategy** 必须覆盖非 TDD 验证：
+  - `TDD Units`: 仅纯逻辑、状态机、数据转换、领域规则；没有则写“无”。
+  - `Unit / Component Checks`: 可低成本执行的目标验证范围；没有则写“无”。
+  - `Mock Smoke`: mock、替身服务或最小可观察记录；没有则写“无”。
+  - `Static Diagnostics`: 实现定位、契约一致、本轮变更文件诊断；没有安全局部能力则写 CI/manual 承接。
+- **Verification Contract** 必须写验证意图、scope 与证据要求，不写死项目命令；由 Implement/QA agent 基于项目实际探索可用方案。
+- Group 默认顺序执行；只有明确 `Depends on` 为空且文件无交集/无共享容器时才可并行。
 - 每个 Task 保持引擎格式：`- [ ] **T-A1** | **Create/Modify/Test**: \`path\` | 摘要 | Ref: F-xx`
-- Task 下用缩进子项写 **Step** / **Verify**（可含代码片段与 vitest/pnpm 命令）。
-- `[TDD]` 任务必须写：先 FAIL → 实现 → PASS 三步 Verify。
+- Task 下用缩进子项写 **Step** / **Verify**（只写验证意图、目标范围与期望证据，避免写死框架命令）。
+- `[TDD]` 任务必须写：先 FAIL → 实现 → PASS → Refactor/无需重构 四步 Verify；非 TDD 任务也必须有 Static Diagnostics / Unit / Mock Smoke / Deferred 之一的验证路径。
 - 末尾 **Spec 覆盖自检** 表：specify 能力 → Task，Plain Language。
 - 可选 **建议提交粒度**（3–5 条 commit message），写在 Final Gate 下。
 
@@ -118,7 +128,8 @@ node "$PLUGIN_ROOT/tools/manage-state.cjs" mark-specify-review-blocked [workspac
 
 - Phase 0 技术项已闭合或已按 Mock 边界写入 §1.3 / §2.1。
 - Implement 仅读 plan 能回答：做什么、不做什么、改哪些文件、跑什么命令验收。
-- Feature 与 Roadmap 无大段重复。
+- Feature 与 Roadmap 无大段重复；Roadmap 的重复必须是“执行所需最小摘要”（User AC / Local Contract），不是整段复制。
+- 每个 Task Group 的 Test Strategy 同时覆盖 TDD 与非 TDD 验证；不得出现只有 `Ref: F-xx`、没有本组验证路径的 Group。
 - 每个功能切片与关键验收要点有 F-xx 与 Task 归宿。
 - 模板锚点完整：`architecture` / `contract` / `feature` / `roadmap` / `execution-log` / `changelog`。
 - 类型名、文件名在全文一致（如 Store/API 命名统一）。

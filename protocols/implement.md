@@ -13,6 +13,8 @@
     "mode": "normal | fix",
     "focusPlan": "<引擎生成的精简版 Plan>",
     "knowledgeContext": "<引擎注入的知识上下文（局部 Patch / 归档 Patch / 全局资产）>",
+    "testStrategy": "<当前 Task Group 的 Test Strategy（TDD Units / Targeted Test / Mock Smoke / Static Diagnostics / Contract Check）>",
+    "completionPacket": "<Implement 在 Ready-for-QA 日志中写入的结构化交接包>",
     "knowledgePolicy": {
       "required": true,
       "decisionCardFormat": "任务意图 | 采用规则(<=3) | 忽略规则及理由",
@@ -26,44 +28,75 @@
 ## 约束
 
 - **mode**：`normal` = 编码新任务（`[ ]`→`[?]`）；`fix` = 根据 QA Failure Report 修复（`[!]`→`[?]`）。引擎 context 含 Bug Fix 时为 fix。
-- **状态回写策略**：默认使用 `manage-state.cjs mark-group <groupId> ready-for-qa` 进行整组送测（一次 verify）；仅在同组混合结果等特殊场景回退 `mark-task` 按任务标记。
+- **状态回写策略**：默认使用 `manage-state.cjs mark-group <groupId> ready-for-qa` 进行整组送测（一次门禁校验）；仅在同组混合结果等特殊场景回退 `mark-task` 按任务标记。
+- **状态机硬门禁**：`ready-for-qa` 转换由 `manage-state.cjs` 强制校验 `implement.completion_packet_ready`。缺少完整 Completion Packet 时，命令会失败并在 `gates.json` 写入 `blocked`；不得用自然语言确认或手工改 checkbox 绕过。
 - **focusPlan**：MUST 将 `suggestedAction.focusPlan` 透传至 `context.focusPlan`。子代理**仅**使用 focusPlan 完成本 Group 任务，**禁止**为完成本 Group 而读取 specify.md 或 plan.md 全文（以节省上下文与 Token）。
-- focusPlan 含：全局 Scope、当前 Group 的 Feature（Design/Contract/Test Scope）、Active Group 任务列表、Log 存证。
+- focusPlan 优先含当前 Task Group 的自足上下文：Goal / Depends on / User AC / Local Contract / Files / Test Strategy / Active Group 任务列表 / 最近失败或存证摘要。旧 plan 回退时才附带相关 Feature 与全局 Contract 摘要。
+- **Test Strategy 是执行依据**：`[TDD]` 只是审计标签；实现时必须按当前 Group 的 Test Strategy 区分 TDD Units、Targeted Test、Mock Smoke、Static Diagnostics、Contract Check。
+- **Completion Packet 是 QA 交接依据**：标记 `ready-for-qa` 前，Implement MUST 在 Ready-for-QA 日志中写入结构化 `Completion Packet`。QA 默认执行 `QA Lite`，只审 `focusPlan + Completion Packet`，不重新读全文 plan、不重新设计测试。
 - **knowledgeContext**：MUST 参与实现决策，但不是“照单全收”。子代理需做二次筛选（适用/不适用），仅采用与当前任务相关的规则，并在 Log 中记录“采用了哪些知识规则 + 为什么”。
 - **相关性决策卡（强制）**：编码前先生成 `任务意图 + 采用规则(<=3) + 忽略规则及理由`，并在 Ready-for-QA 日志中回填一致的规则清单。
 
-## 静态门禁（硬性，Implement 阶段默认零测试）
+## 验证门禁（硬性，Implement 阶段自证）
 
-Implement 阶段的目标是**完成编码 + 最小证据**，完整验证留给 QA 关口统一执行。本阶段的静态检查必须满足：
+Implement 阶段的目标是**完成编码 + 最小证据链**。QA Lite 默认只审计 Completion Packet 与 Verification Matrix，不重新设计测试、不重复执行验证。本阶段按 Task Group 的 Test Strategy 与 Verification Contract 执行。SpecFlow 不规定项目技术栈，也不要求固定命令；验证方案由 agent 基于当前项目文件探索，只能执行安全、局部、可解释的目标。
 
 ### 两条全局硬约束（违反即判 Bug Fix 回滚）
 
 1. **测试执行唯一性（跨阶段去重）**：同一个 spec 文件在 Implement 与 QA 之间**只执行一次**。
    - `[TDD]` 任务：由 Implement 执行（Red→Green→Refactor 三轮），QA **不重跑**（详见 `qa.md`）；
-   - 非 `[TDD]` 任务：由 QA 执行（按 Min spec whitelist / git diff 推断），Implement **不跑、不改、不新建任何测试文件**。
-2. **禁止全量 lint**：只允许 `ReadLints <changed-files>` / `pnpm exec eslint <changed-files>` 增量形式；仓库级 `npm/pnpm/yarn run lint`、`eslint .`、`eslint src/` 一律禁止。
+   - 非 `[TDD]` 任务：若 Test Strategy 把 Targeted Test 明确归给 QA，则 Implement 不跑对应目标；若 Group 中已有安全局部目标用于实现自检，Implement 仅可按 Strategy 指定范围运行一次并在 Log 标注，QA 不重复运行同一目标。
+2. **禁止全量验证冒充局部证据**：任何可能覆盖整库、整模块、启动服务、访问真实环境或不可控扩大范围的命令，都不得作为 Implement 默认动作；除非 Verification Contract 明确要求且 Log 写明 Deviation、范围和原因。
 
-### 允许的静态检查
+### 允许的验证类型
 
-- **首选顺序**：`ReadLints <changed-files>`（IDE 内存诊断，最快、零命令）→ 不足时再 `pnpm exec eslint <changed-files>`（字面 changed-files 或明确 glob，支持 `--fix`）
-- **仅 TDD 任务**（Test Scope 含 `[TDD]`）才运行测试，且 **只跑本任务对应的单个 spec 文件**（Red → Green → Refactor 三轮都只用这一个文件路径）
+- **Static Diagnostics**：只针对本轮变更文件或明确局部范围；若项目没有安全局部能力，则在 Completion Packet 中标注 CI/manual 承接。
+- **Targeted Test**：只针对 Verification Contract 明确的单文件、单用例、单包或等价最小目标；不得执行未限定范围的测试套件。
+- **Contract Check**：通过文件/符号定位证明字段、枚举、权限、接口路径等与 Local Contract 一致。
+- **Smoke Evidence**：仅限 mock、替身、局部可观察记录；需要真实服务/环境的烟雾测试一律 Deferred。
+- **Full Regression / Integration / E2E**：默认 Deferred to CI/manual，不在 Implement 阶段执行。
 
-### 硬性禁止清单
+### 硬性禁止原则
 
-- `pnpm test`（无路径）/ `npm test` / `yarn test`
-- `pnpm exec vitest run --project=<...>` / `vitest run`（无路径）/ `jest`（无路径）
-- `eslint .` / `eslint src/` 等目录级或项目级 lint
-- `npm/pnpm/yarn run lint`（仓库级全量 lint 脚本）；仅允许 `lint:changed` 等增量脚本
-- `tsc --noEmit`（全量类型检查，留给 QA 最后收口）
-- 任何启动本地 dev server / 端到端测试 / Browser MCP 的操作
-- **非 `[TDD]` 任务下** 新建 / 修改 / 运行任何 `*.spec.*`、`*.test.*`、`__tests__/**` 文件（测试用例归属 QA）
+- 不执行无范围参数的项目级/模块级测试、检查、构建或类型验证。
+- 不启动开发/生产服务，不做端到端浏览器验证，不访问真实网络或数据库。
+- 不把“命令通过”当成唯一证据；必须能映射到 Verification Contract 的某一项。
+- 非 TDD 任务不得自行扩展验证范围；除 Test Strategy 明确要求外，禁止新增、修改或运行测试目标。
 
 ### 例外
 
 如确实需要违反上述清单（例如跨文件重构引发的连锁编译错误），必须在 plan Log 的 Implement Evidence 区写明：
   `Deviation: <命令> | 原因: <1 句> | 范围: <涉及文件数>`
 
-## TDD 模式指令 (Test Scope 含 [TDD] 时 MUST 遵守)
+## Completion Packet（Ready-for-QA 交接包，MUST）
+
+Implement 在调用 `mark-group <groupId> ready-for-qa` 之前，必须在 plan Log 写入以下结构。该结构由 `manage-state.cjs` 在状态转换前硬校验；任一关键小节缺失会拒绝进入 `ready-for-qa`。
+
+```markdown
+#### Completion Packet — Group <ID>
+- **Changed Files**:
+  - `<path>`: <关键改动 / 符号 / 组件>
+- **AC Mapping**:
+  - <User AC 摘要> → `<path>:<line-or-symbol>` → <处理方式>
+- **Local Contract Mapping**:
+  - <接口 / 字段 / 枚举 / 权限 / 常量> → `<path>:<line-or-symbol>` → <一致性结论>
+- **Test Strategy Execution**:
+  - TDD Units: <spec path + Red/Green/Refactor 证据位置 / 无>
+  - Unit/Component Checks: <执行者 Implement/QA + 目标验证范围/结果 / 无>
+  - Mock Smoke: <准备/执行步骤 + 可观察结果 / 环境限制 / 无>
+  - Static Diagnostics: <变更文件诊断/规则核对结果 / 无安全局部能力则说明承接>
+- **Verification Matrix**:
+  - Static Diagnostics: <scope> → <evidence/pass/deferred>
+  - Targeted Test: <scope> → <evidence/pass/deferred>
+  - Contract Check: <scope> → <evidence/pass>
+  - Smoke Evidence: <scope> → <evidence/pass/deferred>
+- **Not Run / Deferred**:
+  - <未执行项> → <原因> → <交给 QA / FinalQA / 人工验收>
+- **Knowledge Rules Used**:
+  - <规则名/来源> → <落点>
+```
+
+## TDD 模式指令 (Test Strategy 指定 TDD Units / 任务含 [TDD] 时 MUST 遵守)
 
 必须按 **红 → 绿 → 重构** 三段**严格顺序**走完，且每段都在 plan Log 留下证据。
 
@@ -76,7 +109,7 @@ Implement 阶段的目标是**完成编码 + 最小证据**，完整验证留给
 ### 具体步骤
 
 1. **先写测试 (Red-Setup)**：在项目规范测试目录（如 `__tests__/unit/`、`tests/`、`spec/`）创建测试文件，断言业务逻辑与 AC 边界。**此时 `src/` 不得有任何实现改动。**
-2. **验证失败 (Red)**：**只**跑本任务新增的那一个 spec 文件路径（例如 `pnpm vitest <file>` 或等价命令），确认失败（`FAIL` / `AssertionError` / `expected ... received ...` / `Cannot find module` / `is not a function`）；若一上来就过，必为断言无效，**重写测试**（不是实现）。**禁止**使用项目级 / 模块级（`vitest run --project=...`）或无路径命令。**MUST** 把 Red 终端输出作为代码块写入 plan Log 的 "Implement Evidence / Red" 小节。**Red 证据未落盘前，不得开始第 3 步。**
+2. **验证失败 (Red)**：只执行项目支持的最小目标验证（单文件、单用例、单包或等价局部范围），确认失败（失败关键字/断言差异/缺失实现等）；若一上来就过，必为断言无效，**重写测试**（不是实现）。**禁止**使用未限定范围的项目级/模块级命令。**MUST** 把 Red 输出作为代码块写入 plan Log 的 "Implement Evidence / Red" 小节。**Red 证据未落盘前，不得开始第 3 步。**
 3. **编写实现 (Green-Setup)**：Red 证据落盘**之后**，编写 `src/` 下的最小可用代码使测试通过，**不过度设计**。
 4. **验证通过 (Green)**：**仍然只跑同一个 spec 文件**至全绿；失败则**修正实现代码**直至通过（**不得**为了通过而弱化或删除测试断言）。**MUST** 把 Green 终端输出写入 plan Log 的 "Implement Evidence / Green" 小节。
 5. **重构 (Refactor)**：在 Green 基础上做小步重构（消除重复 / 抽函数 / 命名 / 分层）；重构后**必须重跑**同一个 spec 文件保持全绿（仍然**不跑**整个项目或模块级测试）。**MUST** 在 plan Log 的 "Implement Evidence / Refactor" 小节中二选一：
