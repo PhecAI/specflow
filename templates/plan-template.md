@@ -119,7 +119,7 @@ Plan 写作原则（架构师视角，单一 plan.md）：
 
 ### [F-01] [功能名称]
 
-- **Ref**: `specify.md §3.x` / [验收要点摘要，Plain Language，勿堆 AC 编号]
+- **Ref**: `AC-001` / `AC-002`（可补充关联 `specify.md §3.x`）
 - **Design**:
   - [组件/组合式职责，1–3 条]
   - [关键交互或状态，1–3 条]
@@ -151,7 +151,7 @@ Plan 写作原则（架构师视角，单一 plan.md）：
 - **Goal**: [本组结束时用户/开发者能看到什么]
 - **Depends on**: [无 / Group X]
 - **User AC**:
-  - [本组覆盖的用户可观察验收点，Plain Language]
+  - `AC-001`: [本组覆盖的用户可观察验收点，Plain Language]
 - **Local Contract**:
   - [本组需要的 API / DTO / 枚举 / 权限 / 常量；从 §2 摘取最小集合]
 - **Files**:
@@ -219,11 +219,11 @@ Plan 写作原则（架构师视角，单一 plan.md）：
 
 - [CodeStyle] [section]: [仅当本需求发现全局未覆盖、且可归属到 architecture-layers 的横切规则时填写] (layers: [architecture-layer-id]) (applies: [来自该 layer 的分层级 glob])
 
-### Spec 覆盖自检
+### AC 覆盖自检
 
-| specify 能力 / 验收 | Group / Task |
-|---------------------|--------------|
-| [Plain Language] | T-A1, T-B2 |
+| AC | Feature | Group / Task | 覆盖说明 |
+|----|---------|--------------|----------|
+| AC-001 | F-01 | T-A1, T-B2 | [已覆盖 / 延期 / 非目标依据] |
 
 ---
 

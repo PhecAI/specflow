@@ -8,30 +8,29 @@ model: inherit
 
 把已闭合的产品规格转成**一份**可落地的 `plan.md`：架构师视角、技术澄清先行、Implement 读 plan 即可按 Task 执行。Plan 是实现阶段的唯一真相源。
 
-## 设计思想（与 Superpowers 对齐处 / SpecFlow 坚持处）
+## 设计思想
 
-| 原则 | 做法 |
-|------|------|
-| **单一产物** | 只写 `plan.md`，不拆 design/plan 两文件；设计说明放在 §1，执行步骤放在 §4 |
-| **先澄清后写满** | 技术阻塞未闭合时不生成完整 plan；闭合结论写入 §1.3「已确认技术决策」 |
-| **先能跑起来** | 后端未定时默认 **Mock 主线**：§2.1 Mock 表 + §2.5 联调清单，而非全文 `[待确认]` |
-| **读者分层** | §1–2 给心智模型；§3 给映射与测试意图；§4 给 Files/Steps/Verify（借鉴 Superpowers Task 写法） |
-| **不重复** | Feature 不写逐步操作；Roadmap 不复制 Feature 长段设计 |
-| **可追溯** | Feature Ref 指向 specify 功能切片；Roadmap 任务保留 `Ref: F-xx` 与引擎任务 ID |
-| **SOP 显式** | §1.4 列出仓库内参考文件路径（可选 `.cursor/rules/.../sop-*.mdc`） |
-| **Specify 边界** | 产品口径只在 specify；Plan 只写技术决策、契约、实现路径，不把产品 CQ 写进 plan |
+| 原则             | 做法                                                                            |
+| ---------------- | ------------------------------------------------------------------------------- |
+| **单一产物**     | 只写 `plan.md`，不拆 design/plan 两文件；设计说明放在 §1，执行步骤放在 §4       |
+| **先澄清后写满** | 技术阻塞未闭合时不生成完整 plan；闭合结论写入 §1.3「已确认技术决策」            |
+| **先能跑起来**   | 后端未定时默认 **Mock 主线**：§2.1 Mock 表 + §2.5 联调清单，而非全文 `[待确认]` |
+| **读者分层**     | §1–2 给心智模型；§3 给映射与测试意图；§4 给 Files/Steps/Verify                  |
+| **不重复**       | Feature 不写逐步操作；Roadmap 不复制 Feature 长段设计                           |
+| **可追溯**       | Feature Ref 指向 specify 功能切片；Roadmap 任务保留 `Ref: F-xx` 与引擎任务 ID   |
+| **SOP 显式**     | §1.4 列出仓库内参考文件路径（可选 `.cursor/rules/.../sop-*.mdc`）               |
+| **Specify 边界** | 产品口径只在 specify；Plan 只写技术决策、契约、实现路径，不把产品 CQ 写进 plan  |
 
 ## 终态
 
 - `ai-docs/{需求号}/plan.md` 已按模板生成或更新；或
-- 技术依据不足，已生成技术澄清请求（优先写入 `.temp/clarifications.json` 或最小澄清草稿），执行 blocked 命令，**本轮不写 plan**。用户回答后，闭合结论写入 plan §1.3。
+- 技术依据不足，已生成技术澄清请求（写入 `.temp/clarifications.json`），执行 blocked 命令，**本轮不写 plan**。用户回答后，闭合结论写入 plan §1.3。
 
 <HARD-GATE>
 不得在 specify 仍有未闭合 **产品** `[?]` 时写 plan。
 不得在 **技术澄清** 未闭合时写满 plan（见 Phase 0）。
 不得臆造 API 路径、请求/响应字段、数据库字段、枚举、错误码、权限码或第三方契约。
 不得读取完整 specify.md 替代 focusSpecify，除非 focusSpecify 缺失。
-不得推进 Implement。
 </HARD-GATE>
 
 ## 输入与路径
@@ -46,7 +45,7 @@ model: inherit
 
 ```text
 Phase 0 技术澄清门禁
-  -> 依据足够? 否 -> .temp/clarifications.json / 最小技术澄清草稿 -> blocked -> 停止
+  -> 依据足够? 否 -> .temp/clarifications.json -> blocked -> 停止
   -> 是 -> Phase 1 写 plan.md（§1 摘要/决策 -> §2 契约 -> §3 Feature -> §4 Roadmap）
   -> Phase 2 自检（可读性 + 覆盖 + 锚点 + 任务可执行）
 ```
@@ -62,7 +61,7 @@ Phase 0 技术澄清门禁
 - 权限码、实体类型编码等仅能在联调前占位、但占位策略未确认。
 - specify 中的技术不确定点影响范围/验收，需用户选 Mock 或补文档。
 
-**澄清载体**：优先写入 `ai-docs/{需求号}/.temp/clarifications.json` 的 `technical` 项，或生成最小技术澄清草稿；不要把未闭合技术 CQ 写回完整 `specify.md`。格式同产品 CQ：「需要你决定 / 为什么关键 / SpecFlow 建议」+ Option A/B/C。
+**澄清载体**：写入 `ai-docs/{需求号}/.temp/clarifications.json` 的 `technical` 项；不要把未闭合技术 CQ 写回完整 `specify.md`。格式同产品 CQ：「需要你决定 / 为什么关键 / SpecFlow 建议」+ Option A/B/C。
 
 若技术问题揭示的是产品范围、验收口径、权限或状态不清，必须退回 Specify 产品澄清；不得在 Plan 中替产品做决定。
 
@@ -72,7 +71,7 @@ Phase 0 技术澄清门禁
 - §2.1 给出完整 Mock API 表与 mock 文件路径。
 - §2.5 写联调替换清单；**禁止**在 §2.4 每个接口重复 `[待后端确认]`。
 
-闭合后执行 `ack-specify-review`（或引擎等价流程），再进入 Phase 1。闭合结论写入 plan §1.3「已确认技术决策」；不要求回写 specify，除非该结论改变产品范围或验收，此时应先更新 specify 正式正文。
+技术澄清闭合后，由引擎或 `specflow-specify-review` 完成等价的 Plan Readiness 记录，再进入 Phase 1。闭合结论写入 plan §1.3「已确认技术决策」；不要求回写 specify，除非该结论改变产品范围或验收，此时应先更新 specify 正式正文。
 
 **打回命令**（与现网一致）：
 
@@ -83,7 +82,7 @@ node "$PLUGIN_ROOT/tools/manage-state.cjs" mark-specify-review-blocked [workspac
 
 ### Phase 1：写 plan.md
 
-按模板章节顺序填写，遵守以下**内容质量**要求（汲取 Superpowers，保留 SpecFlow 结构）：
+按模板章节顺序填写，遵守以下**内容质量**要求：
 
 **§1 Architecture**
 
@@ -104,7 +103,7 @@ node "$PLUGIN_ROOT/tools/manage-state.cjs" mark-specify-review-blocked [workspac
 - 每个 specify 功能切片至少一个 `[F-xx]`。
 - **Design** 限 3–5 条要点；**Verification Intent** 只写测试/验证候选，不写执行步骤。
 - `[TDD]` 只作为审计标签，不承担测试设计；真实执行方式必须在 §4 Task Group 的 **Test Strategy** 中闭合。
-- Ref 用 `specify §3.x` + 验收要点**自然语言摘要**；避免 `AC-3.1-01~05` 编号墙。
+- Ref 必须使用 specify 中的全局验收编号：`Ref: AC-001` / `Ref: AC-002`。Feature 可同时标注关联功能切片，但 AC 覆盖审计以 `AC-xxx` 为准。
 
 **§4 Implementation Roadmap**
 
@@ -121,7 +120,7 @@ node "$PLUGIN_ROOT/tools/manage-state.cjs" mark-specify-review-blocked [workspac
 - 每个 Task 保持引擎格式：`- [ ] **T-A1** | **Create/Modify/Test**: \`path\` | 摘要 | Ref: F-xx`
 - Task 下用缩进子项写 **Step** / **Verify**（只写验证意图、目标范围与期望证据，避免写死框架命令）。
 - `[TDD]` 任务必须写：先 FAIL → 实现 → PASS → Refactor/无需重构 四步 Verify；非 TDD 任务也必须有 Static Diagnostics / Unit / Mock Smoke / Deferred 之一的验证路径。
-- 末尾 **Spec 覆盖自检** 表：specify 能力 → Task，Plain Language。
+- 末尾 **AC 覆盖自检** 表：每个 `AC-xxx` → Feature / Task。必须做到 `AC-xxx` 100% 覆盖；若某 AC 不在本轮实现，必须在表中写明延期或非目标依据。
 - 可选 **建议提交粒度**（3–5 条 commit message），写在 Final Gate 下。
 
 ### Phase 2：自检
@@ -130,7 +129,7 @@ node "$PLUGIN_ROOT/tools/manage-state.cjs" mark-specify-review-blocked [workspac
 - Implement 仅读 plan 能回答：做什么、不做什么、改哪些文件、跑什么命令验收。
 - Feature 与 Roadmap 无大段重复；Roadmap 的重复必须是“执行所需最小摘要”（User AC / Local Contract），不是整段复制。
 - 每个 Task Group 的 Test Strategy 同时覆盖 TDD 与非 TDD 验证；不得出现只有 `Ref: F-xx`、没有本组验证路径的 Group。
-- 每个功能切片与关键验收要点有 F-xx 与 Task 归宿。
+- 每个 `AC-xxx` 都有 F-xx 与 Task 归宿；不得只覆盖功能切片标题而遗漏验收项。
 - 模板锚点完整：`architecture` / `contract` / `feature` / `roadmap` / `execution-log` / `changelog`。
 - 类型名、文件名在全文一致（如 Store/API 命名统一）。
 
@@ -154,15 +153,15 @@ node "$PLUGIN_ROOT/tools/manage-state.cjs" mark-specify-review-blocked [workspac
 
 ### 「Plan 里开产品 CQ」
 
-错误。产品问题在 specify 阶段前置澄清；Plan 只处理技术澄清，未闭合问题进入 `.temp/clarifications.json` 或最小技术澄清草稿，闭合后写入 plan §1.3。
+错误。产品问题在 specify 阶段前置澄清；Plan 只处理技术澄清，未闭合问题进入 `.temp/clarifications.json`，闭合后写入 plan §1.3。
 
 ### 「只有任务列表，没有 Verify」
 
 错误。每组至少一条 Group Verify；关键 Task 必须有 Step + Verify。
 
-### 「AC 编号代替人话」
+### 「只写人话，丢失 AC 追踪」
 
-错误。验收用 Plain Language；编号仅在 Spec 覆盖自检表可选保留。
+错误。Feature、User AC 与 AC 覆盖自检必须保留 `AC-xxx`，同时用简洁自然语言解释覆盖意图。
 
 ## 输出契约
 

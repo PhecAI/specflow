@@ -16,7 +16,6 @@ description: Use when the orchestrator dispatches specflow-plan or the requireme
 产品 `[?]` 未闭合不写 plan。
 技术澄清未闭合不写满 plan。
 不得臆造 API、字段、枚举或第三方契约。
-不得推进 Implement。
 </HARD-GATE>
 
 ## 使用时机
@@ -40,13 +39,6 @@ description: Use when the orchestrator dispatches specflow-plan or the requireme
 5. 写 §3：Feature 映射（要点 + Verification Intent，不重复 Roadmap）。
 6. 写 §4：Task Group 作为执行单元；每组内联 Goal / Depends on / User AC / Local Contract / Files / Test Strategy / Group Verify / Task Step+Verify。
 7. 自检可读性与引擎锚点。
-
-## 与 Superpowers 对齐（仍在一份 plan 内）
-
-- §1 ≈ design 的「背景/非目标/决策/目录」
-- §2 Mock 表 ≈ design 的「Mock API」
-- §4 Task Group 的自足上下文 + Task Step/Verify ≈ plan 的可执行步骤
-- 不拆第二份文件；Specify 仍只承载产品规格
 
 ## 反模式
 

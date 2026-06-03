@@ -188,17 +188,29 @@ function parseTempClarifications(filePath) {
   const raw = safeReadJson(filePath, null);
   const entries = normalizeClarificationEntries(raw);
   const questions = [];
+  const closedAnswers = [];
   for (let idx = 0; idx < entries.length; idx++) {
     const item = entries[idx] || {};
     const status = String(item.status || item.state || '').toLowerCase();
+    const id = String(item.id || item.cqId || `${item.type || 'clarification'}_${idx + 1}`);
     const hasAnswer =
       item.answer != null ||
       item.userAnswer != null ||
       item.resolution != null ||
       item.decision != null;
-    if (['closed', 'resolved', 'done'].includes(status) || hasAnswer) continue;
+    if (['closed', 'resolved', 'done'].includes(status) || hasAnswer) {
+      const answer = item.answer ?? item.userAnswer ?? item.resolution ?? item.decision;
+      closedAnswers.push({
+        id,
+        type: item.type || 'clarification',
+        title: item.title || item.prompt || item.question || item.decisionPrompt || item.confirmationPrompt || '',
+        answer,
+        impact: item.impact || item.whyCritical || '',
+        recommendation: item.recommendation || '',
+      });
+      continue;
+    }
 
-    const id = String(item.id || item.cqId || `${item.type || 'clarification'}_${idx + 1}`);
     const promptParts = [];
     const prompt =
       item.prompt ||
@@ -236,6 +248,9 @@ function parseTempClarifications(filePath) {
     openCount: questions.length,
     questions,
     questionsAll: questions,
+    closedAnswers,
+    totalCount: entries.length,
+    sourcePath: filePath,
   };
 }
 
@@ -250,12 +265,42 @@ function mergeClarificationStates(primary, secondary) {
     ...(Array.isArray(a.questionsAll) ? a.questionsAll : []),
     ...(Array.isArray(b.questionsAll) ? b.questionsAll : []),
   ];
+  const closedAnswers = [
+    ...(Array.isArray(a.closedAnswers) ? a.closedAnswers : []),
+    ...(Array.isArray(b.closedAnswers) ? b.closedAnswers : []),
+  ];
   return {
     open: Boolean(a.open || b.open),
     openCount: Number(a.openCount || 0) + Number(b.openCount || 0),
     questions,
     questionsAll,
+    closedAnswers,
   };
+}
+
+function formatClosedClarificationAnswers(answers) {
+  const list = Array.isArray(answers) ? answers.filter((a) => a && a.answer != null) : [];
+  if (list.length === 0) return '';
+  const lines = ['【已闭合澄清答案】', '生成正式 specify.md 时必须只依据以下 answer 字段沉淀到正文与 Decision Log，不得从对话历史猜测答案：'];
+  for (const item of list) {
+    const title = String(item.title || item.id || '').replace(/\s+/g, ' ').trim();
+    const answer = String(item.answer || '').replace(/\s+/g, ' ').trim();
+    const impact = String(item.impact || '').replace(/\s+/g, ' ').trim();
+    const recommendation = String(item.recommendation || '').replace(/\s+/g, ' ').trim();
+    const parts = [`- ${item.id}`];
+    if (title) parts.push(`问题：${title}`);
+    parts.push(`答案：${answer}`);
+    if (impact) parts.push(`影响：${impact}`);
+    if (recommendation) parts.push(`原建议：${recommendation}`);
+    lines.push(parts.join('；'));
+  }
+  return lines.join('\n');
+}
+
+function appendClosedClarificationContext(context, gates) {
+  const summary = formatClosedClarificationAnswers(gates && gates.closedClarificationAnswers);
+  if (!summary) return context;
+  return `${context || ''}\n\n${summary}`.trim();
 }
 
 function autoFixAnchors(tree, filePath, targetKeys) {
@@ -643,7 +688,11 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
     if (autoRef) {
       initSpecifyCtx += `。已确认领域身份「${autoRef}」，编写需求说明前必须先阅读需求内 business-domains。`;
     }
-    return { type: 'dispatch', agent: 'specflow-specify', context: initSpecifyCtx };
+    return {
+      type: 'dispatch',
+      agent: 'specflow-specify',
+      context: appendClosedClarificationContext(initSpecifyCtx, gates),
+    };
   }
 
   // 3. Specify：Domain / Tech 探测与默认派发
@@ -711,7 +760,11 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
       specifyCtx +=
         ' 【强制】已检测到 plan.md 存在但规格未达标（常见于架构师反向打回：在 specify 增加 CQ，含接口文档补全）。必须先闭合澄清/补齐规格；与 plan 契约不一致时应在变更流程中用 sync-document 对齐或重跑 Plan。编排不得跳过 CQ 闭环。';
     }
-    return { type: 'dispatch', agent: 'specflow-specify', context: specifyCtx };
+    return {
+      type: 'dispatch',
+      agent: 'specflow-specify',
+      context: appendClosedClarificationContext(specifyCtx, gates),
+    };
   }
 
   if (phase === 'PlanReadiness') {
@@ -818,6 +871,19 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
         reason: 'Roadmap 中存在 Blocked 任务，请先解决。',
       };
 
+    if (!gates.codeStyleSynced) {
+      const ws = gates.workspaceRoot || '';
+      return {
+        type: 'dispatch',
+        agent: 'specflow-code-style-explorer',
+        context:
+          `基于 plan.md 提炼本需求的代码规范增量（Additions / Overrides）。` +
+          `读取 ai-docs/global-assets/standards/code-style.md 与 ai-docs/global-assets/standards/architecture-layers.md 做去重与分层绑定；` +
+          `只写需求新发现的规范，禁止复制全局已有规则。` +
+          `完成后执行：\`PLUGIN_ROOT=/path/to/specflow node "$PLUGIN_ROOT/tools/manage-state.cjs" ack-code-style-sync ${ws || '[workspaceRoot]'} ${id}\`。`,
+      };
+    }
+
     // 并行派发（仅自动托管时生效）：每个 Group 独立闭环，不互相等待。
     // autoProceedGroups 一旦由用户在 confirm_start_group 选择"自动托管"写入，就持续有效，
     // 直到 Roadmap 全部完成或用户通过 `set-active-group <id>`（不带 --auto）显式退出托管。
@@ -831,11 +897,12 @@ function determineAction(gates, phase, archiveAnchorRequired, id, inHistory) {
           // 明确声明调度语义：任一 Group 完成即可触发该 Group 的下一步推进，不需要批量等齐。
           waitPolicy: 'any_done',
           groupIsolation: true,
-          agents: gates.parallelGroupActions.map((action) => ({
+          items: gates.parallelGroupActions.map((action) => ({
             agent: action.agent,
             context: action.context,
             groupId: action.groupId,
             dependsOn: Array.isArray(action.dependsOn) ? action.dependsOn : [],
+            ...(action.mode ? { mode: action.mode } : {}),
             ...(action.qaMode ? { qaMode: action.qaMode } : {}),
             ...(action.finalQa === true ? { finalQa: true } : {}),
           })),
@@ -1094,9 +1161,10 @@ function isArchiveAnchorAllowed(registryOrDir) {
 
 function detectPhase(
   hasSpecify,
-  specifyComplete,
+  specifyDocumentReady,
   hasPlan,
   planReadinessComplete,
+  planDocumentReady,
   pendingTaskCount,
   readyForQACount,
   failedTaskCount,
@@ -1104,9 +1172,10 @@ function detectPhase(
 ) {
   if (!hasSpecify) return 'Init';
   // specify.md 存在但未完整生成（仅 Draft，缺少功能切片/验收要点）→ 仍停留在 Specify
-  if (!specifyComplete) return 'Specify';
+  if (!specifyDocumentReady) return 'Specify';
   if (!hasPlan && !planReadinessComplete) return 'PlanReadiness';
   if (!hasPlan) return 'Plan';
+  if (!planDocumentReady) return 'Plan';
   // 任何非完成状态的任务存在 → 仍在 Implement 阶段（含 QA 验收子阶段）
   if (
     pendingTaskCount > 0 ||
@@ -1116,6 +1185,43 @@ function detectPhase(
   )
     return 'Implement';
   return 'Archive';
+}
+
+function syncArtifactGate(requirementDir, gateRegistry, gateId, ready, snapshot, evidence) {
+  const current = getGate(gateRegistry, gateId);
+  if (ready) {
+    if (!gatePassed(gateRegistry, gateId, { snapshot })) {
+      const result = passGate(requirementDir, gateId, { snapshot, evidence });
+      if (result && result.ok) gateRegistry.gates[gateId] = result.gate;
+    }
+    return;
+  }
+  if (current && current.status === 'passed') {
+    const result = resetGate(requirementDir, gateId, {
+      reason: 'artifact is not ready',
+      snapshot,
+      evidence: evidence ? [`not ready: ${evidence}`] : [],
+    });
+    if (result && result.ok) gateRegistry.gates[gateId] = result.gate;
+  }
+}
+
+function dispatchArrayItems(suggestedAction) {
+  if (!suggestedAction || suggestedAction.type !== 'dispatch_array') return [];
+  if (Array.isArray(suggestedAction.items)) return suggestedAction.items;
+  if (Array.isArray(suggestedAction.agents)) return suggestedAction.agents;
+  return [];
+}
+
+function buildSpecifyKnowledgeHint(gates, suggestedAction, specifyContent) {
+  const parts = [];
+  if (suggestedAction && suggestedAction.context) parts.push(suggestedAction.context);
+  const refs = Array.isArray(gates && gates.domainInitRefs) ? gates.domainInitRefs : [];
+  if (refs.length > 0) parts.push(`confirmed domains: ${refs.join(', ')}`);
+  if (typeof specifyContent === 'string' && specifyContent.trim()) {
+    parts.push(specifyContent);
+  }
+  return parts.filter(Boolean).join('\n\n');
 }
 
 const EXCLUDED_AI_DOCS_DIRS = new Set(['history', 'knowledge-base']);
@@ -1941,6 +2047,12 @@ function buildCodeStyleSlice(workspaceRoot, requirementId, hintText) {
     '',
   ];
   for (const r of hitRules) {
+    const status = String((r && r.status) || '').trim();
+    if (status && status !== 'Verified') {
+      lines.push(
+        `> [${status}] 以下规则仍在置信度阶梯中，不能单独作为 QA Fail 判据；需要结合 plan 契约、代码证据或人工评审。`,
+      );
+    }
     lines.push(renderRuleLine(r));
   }
   return lines.join('\n');
@@ -2289,9 +2401,8 @@ function runEngineInner(workspaceRoot, requirementId) {
   const markdownClarification = specifyTree
     ? parseClarificationFromTree(specifyTree, specifyContent || '')
     : { open: false, openCount: 0, questions: [], questionsAll: [] };
-  const tempClarification = parseTempClarifications(
-    path.join(dir, '.temp', 'clarifications.json'),
-  );
+  const tempClarificationPath = path.join(dir, '.temp', 'clarifications.json');
+  const tempClarification = parseTempClarifications(tempClarificationPath);
   const clarification = mergeClarificationStates(
     markdownClarification,
     tempClarification,
@@ -2322,6 +2433,20 @@ function runEngineInner(workspaceRoot, requirementId) {
       inlineClarificationDebt.count === 0 &&
       !autoClarificationNeedsReview
     : false;
+  const productClarificationClosed =
+    hasSpecify &&
+    blockerInSpecify === 0 &&
+    !clarification.open &&
+    inlineClarificationDebt.count === 0 &&
+    !autoClarificationNeedsReview;
+
+  if (specifyComplete && fs.existsSync(tempClarificationPath)) {
+    try {
+      fs.unlinkSync(tempClarificationPath);
+    } catch (_) {
+      // 清理失败不阻断引擎主流程；下一轮仍会按文件状态重算。
+    }
+  }
   const groups = planTree ? parseGroupsFromTree(planTree) : [];
   const roadmap = planTree
     ? deriveRoadmapStats(planTree, groups)
@@ -2379,6 +2504,50 @@ function runEngineInner(workspaceRoot, requirementId) {
     workspaceRoot,
     path.join('ai-docs', id, 'specify.md'),
   );
+  const planSnapshot = fileSnapshot(
+    workspaceRoot,
+    path.join('ai-docs', id, 'plan.md'),
+  );
+  const codeStyleSynced =
+    hasPlan &&
+    gatePassed(gateRegistry, 'plan.code_style_synced', { snapshot: planSnapshot });
+  syncArtifactGate(
+    dir,
+    gateRegistry,
+    'specify.product_clarification',
+    productClarificationClosed,
+    null,
+    'product clarifications closed',
+  );
+  const productClarificationGateValid =
+    hasSpecify && gatePassed(gateRegistry, 'specify.product_clarification');
+  syncArtifactGate(
+    dir,
+    gateRegistry,
+    'specify.document_ready',
+    specifyComplete,
+    specifySnapshot,
+    'specify.md complete and clarifications closed',
+  );
+  const specifyDocumentReadyGateValid =
+    hasSpecify &&
+    gatePassed(gateRegistry, 'specify.document_ready', {
+      snapshot: specifySnapshot,
+    });
+  const planDocumentCandidateReady = hasPlan;
+  syncArtifactGate(
+    dir,
+    gateRegistry,
+    'plan.document_ready',
+    planDocumentCandidateReady,
+    planSnapshot,
+    'plan.md exists',
+  );
+  const planDocumentReadyGateValid =
+    hasPlan &&
+    gatePassed(gateRegistry, 'plan.document_ready', {
+      snapshot: planSnapshot,
+    });
   const planReadinessGateValid =
     hasSpecify &&
     gatePassed(gateRegistry, 'plan.readiness_review', {
@@ -2407,16 +2576,18 @@ function runEngineInner(workspaceRoot, requirementId) {
       state.specifyAckMtime >= specifyMtimeNow) ||
     planUserConfirmGateValid;
   const planReadinessComplete =
-    canProceedToPlan &&
+    productClarificationGateValid &&
+    specifyDocumentReadyGateValid &&
     effectiveSpecifyReviewValid &&
     effectiveAckSpecifyBeforePlan &&
     !planReadinessGateBlocked &&
     technicalClarificationDebt.count === 0;
   const phase = detectPhase(
     hasSpecify,
-    specifyComplete,
+    specifyDocumentReadyGateValid,
     hasPlan,
     planReadinessComplete,
+    planDocumentReadyGateValid,
     roadmap.pending,
     roadmap.readyForQA,
     roadmap.failed,
@@ -2445,6 +2616,10 @@ function runEngineInner(workspaceRoot, requirementId) {
     gateRegistry,
     architectureLayersReady,
     specifySnapshot,
+    specifyDocumentReady: specifyDocumentReadyGateValid,
+    planSnapshot,
+    planDocumentReady: planDocumentReadyGateValid,
+    productClarificationGateValid,
     planReadinessGateValid,
     planReadinessGateBlocked,
     planReadinessGateReason:
@@ -2473,6 +2648,7 @@ function runEngineInner(workspaceRoot, requirementId) {
     openClarificationCount: clarification.openCount,
     questions: clarification.questions || [],
     clarificationQuestionsAll: clarification.questionsAll || [],
+    closedClarificationAnswers: clarification.closedAnswers || [],
     inlineClarificationDebtCount: inlineClarificationDebt.count,
     inlineClarificationDebtItems: inlineClarificationDebt.items,
     technicalClarificationDebtCount: technicalClarificationDebt.count,
@@ -2498,6 +2674,7 @@ function runEngineInner(workspaceRoot, requirementId) {
       typeof state.codeStyleExploredMtime === 'number'
         ? state.codeStyleExploredMtime
         : 0,
+    codeStyleSynced,
     domainInitChoice:
       state.domainInitChoice === 'scan' || state.domainInitChoice === 'skip'
         ? state.domainInitChoice
@@ -2544,13 +2721,13 @@ function runEngineInner(workspaceRoot, requirementId) {
   }
 
   // dispatch_array（自动托管下的 per-group pipeline 并行派发）：为每个 action 附 focusPlan，并整批落盘 pending-protocol
-  if (
-    suggestedAction.type === 'dispatch_array' &&
-    Array.isArray(suggestedAction.agents)
-  ) {
+  if (suggestedAction.type === 'dispatch_array') {
+    const batchActions = dispatchArrayItems(suggestedAction);
+    suggestedAction.items = batchActions;
+    delete suggestedAction.agents;
     // 先为每个 action 预计算 focusPlan（后续既作为 action.focusPlan，也作为 knowledgeContext 的 hint）
     const focusPlansByAction = new Map();
-    for (const action of suggestedAction.agents) {
+    for (const action of batchActions) {
       const gid = action && action.groupId;
       let focusPlan = null;
       if (planTree && gid) {
@@ -2565,7 +2742,7 @@ function runEngineInner(workspaceRoot, requirementId) {
 
     // hintText = 各 group 的 focusPlan 拼接（包含 Create/Modify 路径 + Active Group 任务描述）
     // 这样 buildCodeStyleSlice 能抽到所有 group 的文件路径；scoreKnowledgeChunk 也能命中 domain。
-    const hintForKnowledge = suggestedAction.agents
+    const hintForKnowledge = batchActions
       .map((a) => focusPlansByAction.get(a) || (a && a.context) || '')
       .filter(Boolean)
       .join('\n\n');
@@ -2577,7 +2754,7 @@ function runEngineInner(workspaceRoot, requirementId) {
     );
 
     const items = [];
-    for (const action of suggestedAction.agents) {
+    for (const action of batchActions) {
       const gid = action && action.groupId;
       const focusPlan = focusPlansByAction.get(action) || null;
       if (focusPlan) action.focusPlan = focusPlan;
@@ -2593,6 +2770,7 @@ function runEngineInner(workspaceRoot, requirementId) {
         context: action.context,
         focusPlan: focusPlan,
         dependsOn: Array.isArray(action.dependsOn) ? action.dependsOn : [],
+        ...(action.mode ? { mode: action.mode } : {}),
         ...(action.qaMode ? { qaMode: action.qaMode } : {}),
         ...(action.finalQa === true ? { finalQa: true } : {}),
       });
@@ -2663,8 +2841,15 @@ function runEngineInner(workspaceRoot, requirementId) {
       if (focusArchive) suggestedAction.focusArchive = focusArchive;
     }
 
-    // 相关性提示优先使用 focusPlan，其次已有上下文；据此排序全局知识片段
-    const knowledgeHint = computedFocusPlan || suggestedAction.context || '';
+    // 相关性提示优先使用 focusPlan；code-style explorer 的派发上下文本身较泛，改用 plan.md 抽取领域与路径信号。
+    const knowledgeHint =
+      computedFocusPlan ||
+      (suggestedAction.agent === 'specflow-specify'
+        ? buildSpecifyKnowledgeHint(gates, suggestedAction, specifyContent)
+        : '') ||
+      (suggestedAction.agent === 'specflow-code-style-explorer' && planContent
+        ? planContent
+        : suggestedAction.context || '');
     const knowledgeContext = buildKnowledgeContext(
       workspaceRoot,
       id,

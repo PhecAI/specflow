@@ -35,7 +35,7 @@ function specifyComplete(extraInBody = '') {
 - **权限要求**:
   - Default.
 - **验收要点**:
-  - Done.
+  - **[AC-001]** Done.
 
 ## Business Objects & States
 <!-- specflow:section=business-objects -->
@@ -57,8 +57,8 @@ ${extraInBody}
 function specifyDraftWithBlocker() {
   return `# Draft
 
-## Executive Summary
-<!-- specflow:section=executive-summary -->
+## Requirement Overview
+<!-- specflow:section=overview -->
 Text [BLOCKER] in draft.
 
 ## Changelog
@@ -93,8 +93,8 @@ function specifyWithOpenClarification() {
 function specifyDraftMinimal() {
   return `# Draft
 
-## Executive Summary
-<!-- specflow:section=executive-summary -->
+## Requirement Overview
+<!-- specflow:section=overview -->
 Draft only.
 
 ## Clarification Log
@@ -115,8 +115,8 @@ Draft only.
 function specifyIncompleteDomainCQClosed(domainName = 'Payment') {
   return `# Draft Domain
 
-## Executive Summary
-<!-- specflow:section=executive-summary -->
+## Requirement Overview
+<!-- specflow:section=overview -->
 X.
 
 ## Clarification Log
@@ -141,6 +141,9 @@ X.
  * F-01 出现在 Group 文本中以供 focus 构建。
  */
 function planWithRoadmap(taskLine = '- [ ] Task | F-01 |', extraGroups = '') {
+  const roadmapBody = addDefaultTaskGroupContext(`### 📦 Group A: First
+${taskLine}
+${extraGroups}`)
   return `# Plan
 
 ## Architecture
@@ -158,9 +161,7 @@ Design.
 
 ## Roadmap
 <!-- specflow:section=roadmap -->
-### 📦 Group A: First
-${taskLine}
-${extraGroups}
+${roadmapBody}
 
 ## Execution Log
 <!-- specflow:section=execution-log -->
@@ -170,6 +171,36 @@ Log.
 <!-- specflow:section=changelog -->
 - Initial
 `;
+}
+
+function addDefaultTaskGroupContext(roadmapBody) {
+  const lines = String(roadmapBody || '').split('\n')
+  const out = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    out.push(line)
+    if (!/^###\s+(?:📦\s*)?Group\s+\w+/i.test(line.trim())) continue
+    let j = i + 1
+    while (j < lines.length && !lines[j].trim()) j++
+    if (j < lines.length && /^\s*-\s+\*\*Goal\*\*\s*[:：]/i.test(lines[j])) continue
+    out.push(
+      '- **Goal**: 完成本组交付',
+      '- **Depends on**: none',
+      '- **User AC**:',
+      '  - AC-001 覆盖本组用户可观察验收点',
+      '- **Local Contract**:',
+      '  - 本组接口、字段、权限与常量保持一致',
+      '- **Files**:',
+      '  - Modify: `src/example.ts`',
+      '- **Test Strategy**:',
+      '  - TDD Units: none',
+      '  - Unit/Component Checks: targeted local checks',
+      '  - Mock Smoke: none',
+      '  - Static Diagnostics: changed files evidence',
+      '- **Group Verify**: AC mapping + Local Contract + targeted evidence',
+    )
+  }
+  return out.join('\n')
 }
 
 /** 全部 [x] 且无其它未完成任务 → 可进 Archive */

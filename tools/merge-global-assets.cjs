@@ -17,6 +17,8 @@ const {
   normalizeCodingPatchSection,
   normalizeCodingPatchContent,
   normalizeCodingPatchStrength,
+  normalizeSourceRequirementIds,
+  deriveCodeStyleConfidence,
   stripStrengthPrefix,
   normalizeContentForDedup,
   parseGlobalCodeStyleRules,
@@ -47,6 +49,13 @@ function parseCodeStyleMap(content) {
     if (!rule) continue
     const key = `${section}::${normalizeContentForDedup(rule)}`
     const row = { section, content: rule, sourceRequirementId: null }
+    const sourceRequirementIds = normalizeSourceRequirementIds(item.sourceRequirementIds)
+    if (sourceRequirementIds.length > 0) {
+      row.sourceRequirementIds = sourceRequirementIds
+      const ladder = deriveCodeStyleConfidence(sourceRequirementIds)
+      row.status = ladder.status
+      row.confidence = ladder.confidence
+    }
     if (Array.isArray(item.applies) && item.applies.length > 0) row.applies = item.applies
     const strength = normalizeCodingPatchStrength(item.strength)
     if (strength) row.strength = strength
@@ -70,6 +79,17 @@ function parseCodeStyleMap(content) {
     if (!rule) continue
     const key = `${section}::${normalizeContentForDedup(rule)}`
     const row = { section, content: rule, sourceRequirementId }
+    const sourceRequirementIds = normalizeSourceRequirementIds(
+      stripped.sourceRequirementIds && stripped.sourceRequirementIds.length > 0
+        ? stripped.sourceRequirementIds
+        : sourceRequirementId,
+    )
+    if (sourceRequirementIds.length > 0) {
+      row.sourceRequirementIds = sourceRequirementIds
+      const ladder = deriveCodeStyleConfidence(sourceRequirementIds)
+      row.status = ladder.status
+      row.confidence = ladder.confidence
+    }
     if (Array.isArray(stripped.applies) && stripped.applies.length > 0) row.applies = stripped.applies
     if (strengthSplit.strength) row.strength = strengthSplit.strength
     // 与前一路径合并：取最强 strength + applies 并集
@@ -84,6 +104,16 @@ function parseCodeStyleMap(content) {
       if (appMerged.length > 0) row.applies = appMerged
       if (!row.sourceRequirementId && prev.sourceRequirementId) {
         row.sourceRequirementId = prev.sourceRequirementId
+      }
+      const sourceMerged = normalizeSourceRequirementIds([
+        ...(prev.sourceRequirementIds || []),
+        ...(row.sourceRequirementIds || []),
+      ])
+      if (sourceMerged.length > 0) {
+        row.sourceRequirementIds = sourceMerged
+        const ladder = deriveCodeStyleConfidence(sourceMerged)
+        row.status = ladder.status
+        row.confidence = ladder.confidence
       }
     }
     out.set(key, row)
@@ -106,7 +136,7 @@ function renderCodeStyleFromMap(ruleMap) {
     '## Rules by Scope',
     '',
   ]
-  lines.push(renderRulesByScope(rows))
+  lines.push(renderRulesByScope(rows, { includeSources: true, includeSource: false }))
   lines.push('## Rules by Section', '')
   // 按 section 分组输出
   const bySection = new Map()
@@ -119,7 +149,7 @@ function renderCodeStyleFromMap(ruleMap) {
   for (const s of sections) {
     lines.push(`### \`${s}\``)
     for (const row of bySection.get(s)) {
-      lines.push(renderRuleLine(row))
+      lines.push(renderRuleLine(row, { includeSources: true, includeSource: false }))
     }
     lines.push('')
   }
@@ -253,6 +283,17 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
       }
       const incomingApplies = Array.isArray(patch.applies) ? patch.applies.filter(Boolean) : null
       const prev = styleMap.get(key)
+      const sourceRequirementIds = normalizeSourceRequirementIds([
+        ...((prev && prev.sourceRequirementIds) || []),
+        ...normalizeSourceRequirementIds(patch.sourceRequirementIds),
+        row.sourceRequirementId,
+      ])
+      if (sourceRequirementIds.length > 0) {
+        row.sourceRequirementIds = sourceRequirementIds
+        const ladder = deriveCodeStyleConfidence(sourceRequirementIds)
+        row.status = ladder.status
+        row.confidence = ladder.confidence
+      }
       const merged = new Set([
         ...((prev && Array.isArray(prev.applies)) ? prev.applies : []),
         ...((incomingApplies || [])),

@@ -11,6 +11,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const { blockGate } = require('./gates.cjs');
+const { mergeState } = require('./specflow-state.cjs');
 const { parseMarkdownTree, findByKey, renderNode, renderNodeShallow } = require('./plan-parser.cjs');
 
 const UTF8 = 'utf-8';
@@ -18,7 +20,6 @@ const UTF8 = 'utf-8';
 /**
  * 精简 specify.md（使用健壮的 AST 解析器）：
  * 新结构保留 H1 标题 + Requirement Overview + Product Decisions + Capabilities。
- * 旧结构回退保留 Executive Summary + User Roles & Scenarios + Acceptance Criteria。
  * 丢弃过程性的 Clarification Log / Decision Log 和 Changelog。
  * @param {string} content - specify.md 原始内容
  * @returns {string} 精简后的内容
@@ -38,14 +39,7 @@ function slimSpecifyContent(content) {
   }
 
   // 2. 按需保留核心章节（利用锚点精确提取，无视用户的额外 H2 排版）
-  const hasNewStructure =
-    findByKey(tree, 'overview') ||
-    findByKey(tree, 'productDecisions') ||
-    findByKey(tree, 'capabilities');
-  const keepKeys = hasNewStructure
-    ? ['overview', 'productDecisions', 'capabilities']
-    : ['executiveSummary', 'userScenarios', 'acceptanceCriteria'];
-  for (const key of keepKeys) {
+  for (const key of ['overview', 'productDecisions', 'capabilities']) {
     const section = findByKey(tree, key);
     if (section) {
       parts.push(renderNode(section));
@@ -152,6 +146,20 @@ function main() {
   }
 
   const tempDir = path.join(sourceDir, '.temp');
+  function recordGlobalMergeFailure(reason) {
+    try {
+      mergeState(sourceDir, { knowledgeReviewed: false });
+      blockGate(sourceDir, 'archive.knowledge_reviewed', {
+        stage: 'Archive',
+        scope: 'requirement',
+        subject: 'knowledge patch review',
+        reason: String(reason || 'global assets merge failed'),
+        evidence: 'archive global merge failed; rerun knowledge reviewer before retrying archive',
+      });
+    } catch (_) {
+      // 失败恢复记录不能掩盖原始归档错误。
+    }
+  }
   // 全局资产合并统一在确认归档后执行（单一入口：archive），严格走结构化合并路径。
   // 若 merge-global-assets.cjs 不可用则归档失败——禁止回退到老 bullet 版本以避免格式漂移。
   let merged = { mergedDomains: [] };
@@ -161,11 +169,15 @@ function main() {
     if (r && r.ok) {
       merged = r;
     } else {
-      console.log(JSON.stringify({ ok: false, error: `全局合并失败：${(r && r.error) || '未知错误'}` }));
+      const error = `全局合并失败：${(r && r.error) || '未知错误'}`;
+      recordGlobalMergeFailure(error);
+      console.log(JSON.stringify({ ok: false, error }));
       process.exit(1);
     }
   } catch (e) {
-    console.log(JSON.stringify({ ok: false, error: `全局合并模块加载失败，禁止降级到老 bullet 合并: ${String(e)}` }));
+    const error = `全局合并模块加载失败，禁止降级到老 bullet 合并: ${String(e)}`;
+    recordGlobalMergeFailure(error);
+    console.log(JSON.stringify({ ok: false, error }));
     process.exit(1);
   }
   if (fs.existsSync(tempDir)) {

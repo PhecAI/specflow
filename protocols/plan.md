@@ -28,7 +28,7 @@
 ## 约束
 
 - **focusSpecify**：MUST 将 `suggestedAction.focusSpecify` 透传至 `context.focusSpecify`。子代理优先使用此字段；`specifyPath` 仅用于回退（focusSpecify 缺失时）。  
-- focusSpecify 由引擎从正式 specify.md 提取；新结构含 Requirement Overview、Product Decisions、Capabilities、Business Objects，旧结构兼容 Executive Summary、User Scenarios、Business Rules、Acceptance Criteria；不含 Decision Log / Clarification Log 与 Changelog。
+- focusSpecify 由引擎从正式 specify.md 提取；仅支持最新结构：Requirement Overview、Product Decisions、Capabilities、Business Objects；不含 Decision Log / Clarification Log 与 Changelog。
 - **knowledgeContext**：用于约束契约设计与 Roadmap 拆解。子代理需先筛选适用规则，再写入 plan（不要机械复制全部知识片段）。
 - **相关性决策卡（强制）**：在输出 plan 前提供 `采用规则(<=3) -> Contract/Verification 映射`，并写明忽略规则原因；plan 内容须与该映射一致。
 - **契约依据（强制）**：若用户未在规格或可引用材料中提供可落地的 **接口/字段变更** 依据，子代理 **不得** 在 `plan.md` 中编造具体接口路径与字段；**必须**按 `agents/specflow-plan.md` Phase 0 生成技术澄清状态并 blocked，待用户闭合后再生成 plan。用户授权 Mock 时，plan 以 §2.1 Mock 表 + §2.5 联调清单为 Implement 默认对接面。

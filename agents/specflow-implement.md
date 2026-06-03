@@ -55,9 +55,9 @@ node "$PLUGIN_ROOT/tools/manage-state.cjs" mark-group [workspaceRoot] <需求号
 **执行规则 (Execution Rules)**：
 
 1.  **Phase 1: 状态自检与日期锚定**
-    - **Context 检查**：若 `context.mode === 'fix'` 或 `focusPlan` 中存在 `[!]` 标记的任务，进入 **Bug Fix 模式**；否则进入 **Normal 模式**。
+    - **Context 检查**：若引擎上下文明确声明 Bug Fix、`mode === 'fix'`、`bugContext` 存在，或 `focusPlan` 中存在 `[!]` 标记的任务，进入 **Bug Fix 模式**；否则进入 **Normal 模式**。不要只依赖 `context.mode`，单 Group 派发可能不包含该字段。
     - **系统时间**: 执行 `utils.cjs date`（命令：`PLUGIN_ROOT=/path/to/specflow node "$PLUGIN_ROOT/tools/utils.cjs" date"`）。
-    - **契约锁定**: 优先从 `focusPlan` 的 **Local Contract** 锁定当前 Task Group 需要的 API / DTO / 枚举 / 权限 / 常量；旧 plan 回退时再读取关联 [F-xx] Contract。
+    - **契约锁定**: 从 `focusPlan` 的 **Local Contract** 锁定当前 Task Group 需要的 API / DTO / 枚举 / 权限 / 常量；若 focusPlan 缺少 Local Contract，视为 plan 结构不达标，返回阻塞说明。
     - **测试策略扫描**: 从 `focusPlan` 的 **Test Strategy / Verification Contract** 识别 `TDD Units`、`Targeted Test`、`Mock Smoke`、`Static Diagnostics`、`Contract Check`；`[TDD]` 只是审计标签，不替代 Test Strategy。
     - **知识二次筛选 (MUST)**：从 `knowledgeContext` 中提取与当前任务最相关的 1-3 条规则，按「采用/忽略」分类；忽略时必须有理由（如“与当前 Group 无关”）。
     - **相关性决策卡 (MUST)**：在开始编码前先写一段简短决策（不超过 6 行）：

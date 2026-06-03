@@ -79,10 +79,6 @@ const SECTION_REGISTRY = {
   productDecisions: { anchor: 'product-decisions', predicate: (n) => n.level === 2 && /product\s*decisions|产品决策|决策与边界/i.test(n.title) },
   capabilities:     { anchor: 'capabilities',      predicate: (n) => n.level === 2 && /capabilities|功能切片|功能能力/i.test(n.title) },
   businessObjects:  { anchor: 'business-objects',  predicate: (n) => n.level === 2 && /business\s*objects|业务对象|对象与状态|状态/i.test(n.title) },
-  executiveSummary: { anchor: 'executive-summary', predicate: (n) => n.level === 2 && /executive\s*summary|背景与价值/i.test(n.title) },
-  userScenarios:    { anchor: 'user-scenarios',    predicate: (n) => n.level === 2 && /user\s*roles|用户角色/i.test(n.title) },
-  businessRules:    { anchor: 'business-rules',    predicate: (n) => n.level === 2 && /business\s*rules|业务规则/i.test(n.title) },
-  acceptanceCriteria:{ anchor: 'acceptance-criteria',predicate: (n) => n.level === 2 && /acceptance\s*criteria|验收标准/i.test(n.title) },
   clarificationLog: { anchor: 'clarification-log', predicate: (n) => n.level === 2 && /clarification|decision\s*log|决策记录|open\s*product\s*(?:decisions|questions)|待决策|待产品决策|待产品确认|待确认/i.test(n.title) },
   changelog:        { anchor: 'changelog',         predicate: (n) => n.level === 2 && /changelog|修改日志/i.test(n.title) },
 }
@@ -121,6 +117,61 @@ function renderNodeShallow(node) {
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function stripInlineMarkdown(value) {
+  return String(value || '')
+    .replace(/\*\*/g, '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .trim()
+}
+
+/**
+ * 从新 Specify 的 Capabilities 中提取全局 AC 索引。
+ * Capability 结构保留业务语义，AC 索引为 Plan 的覆盖审计提供机器可检验入口。
+ */
+function extractAcceptanceCriteriaIndex(specifyTree) {
+  const capabilities = findByKey(specifyTree, 'capabilities')
+  if (!capabilities) return []
+
+  const lines = renderNode(capabilities).split('\n')
+  const items = []
+  const seen = new Set()
+  let currentCapability = ''
+
+  for (const line of lines) {
+    const heading = line.match(/^#{3,6}\s+(.+?)\s*$/)
+    if (heading) {
+      currentCapability = stripInlineMarkdown(heading[1])
+      continue
+    }
+
+    const match = line.match(/(?:\*\*)?\[(AC-\d{3,})\](?:\*\*)?\s*[:：]?\s*(.+?)\s*$/i)
+    if (!match) continue
+
+    const id = match[1].toUpperCase()
+    if (seen.has(id)) continue
+    seen.add(id)
+
+    items.push({
+      id,
+      capability: currentCapability,
+      text: stripInlineMarkdown(match[2]),
+    })
+  }
+
+  return items
+}
+
+function renderAcceptanceCriteriaIndex(items) {
+  if (!items || items.length === 0) return ''
+  const lines = ['## Acceptance Criteria Index', '']
+  for (const item of items) {
+    const capability = item.capability ? ` (${item.capability})` : ''
+    lines.push(`- **${item.id}**${capability}: ${item.text}`)
+  }
+  return lines.join('\n')
 }
 
 // ── 动态内容提取（Group / Feature ID 仍使用标题正则，不引入锚点）──
@@ -535,11 +586,9 @@ function sectionHasSubstantiveContent(node) {
   return substantive.length > 0
 }
 
-/** 检测 specify.md 是否完整：没有未闭合的澄清且包含必要的章节。这部分被简化，因为现在是一次性生成。 */
+/** 检测 specify.md 是否完整：最新格式必须包含 Capabilities 与实质验收要点。 */
 function isSpecifyCompleteFromTree(tree) {
-  // 只要没有 open 的澄清，就认为完成（AST 会被 parseClarificationFromTree 处理）
-  // 新结构以 Capabilities 的「验收要点」为完整性依据；旧结构回退检查 Acceptance Criteria。
-  const section = findByKey(tree, 'capabilities') || findByKey(tree, 'acceptanceCriteria')
+  const section = findByKey(tree, 'capabilities')
   return !!section && sectionHasSubstantiveContent(section)
 }
 
@@ -581,8 +630,7 @@ function extractRelevantExecutionLog(tree, activeGroupId) {
 
 /**
  * 为 Implement/QA 子代理构建精简版 Plan 上下文（基于 AST）。
- * 新版 Task Group 自带 User AC / Local Contract / Test Strategy 时，优先只下发自足 Group。
- * 旧版 plan 缺少自足字段时，保留 Architecture / Contract / Related Features 兼容路径。
+ * 最新格式要求 Task Group 自带 User AC / Local Contract / Test Strategy；缺失时不回退拼接旧上下文。
  */
 function buildFocusPlanFromTree(tree, activeGroupId) {
   if (!tree || !activeGroupId) return null
@@ -619,67 +667,12 @@ function buildFocusPlanFromTree(tree, activeGroupId) {
     return parts.filter(Boolean).join('\n\n---\n\n')
   }
 
-  // 追加 Architecture & Tech Stack
-  const archSection = findByKey(tree, 'architecture')
-  if (archSection) {
-    parts.push(renderNode(archSection))
-  }
-
-  // 追加 Technical Contracts，给实现提供数据模型和API契约
-  const contractSection = findByKey(tree, 'contract')
-  if (contractSection) {
-    parts.push(renderNode(contractSection))
-  }
-
-  // 2. 构建 Feature ID → Node Map
-  const featureSection = findByKey(tree, 'feature')
-  const featureMap = {}
-  if (featureSection) {
-    for (const child of featureSection.children) {
-      const fid = parseFeatureId(child.title)
-      if (fid) featureMap[fid] = child
-    }
-  }
-
-  // 4. 从 Group 任务行提取关联 Feature ID
-  const relatedFeatureIds = new Set()
-  const fidRegex = /\|\s*(F-\d+)/g
-  let fm
-  while ((fm = fidRegex.exec(groupText)) !== null) {
-    relatedFeatureIds.add(fm[1])
-  }
-
-  // 5. 组装关联 Feature 块（去除尾部分隔线）
-  if (relatedFeatureIds.size > 0) {
-    const blocks = []
-    for (const fid of relatedFeatureIds) {
-      if (featureMap[fid]) {
-        let rendered = renderNode(featureMap[fid]).trimEnd()
-        rendered = rendered.replace(/\n---\s*$/, '').trimEnd()
-        blocks.push(rendered)
-      }
-    }
-    if (blocks.length > 0) {
-      parts.push('## Related Features & Design\n\n' + blocks.join('\n\n---\n\n'))
-    }
-  }
-
-  // 6. Active Group 任务列表
-  parts.push('## Active Group\n\n' + groupText)
-
-  // 7. Log 章节
-  const logSection = findByKey(tree, 'executionLog')
-  if (logSection) {
-    parts.push(renderNode(logSection))
-  }
-
-  return parts.filter(Boolean).join('\n\n---\n\n')
+  return null
 }
 
 /**
  * 为 Plan 子代理构建精简版 Specify 上下文。
  * 新结构保留：Requirement Overview、Product Decisions、Capabilities、Business Objects。
- * 旧结构回退保留：Executive Summary、User Scenarios、Business Rules、Acceptance Criteria。
  * 裁掉：Decision Log / Clarification Log、Changelog。
  */
 function buildFocusSpecify(specifyTree) {
@@ -694,20 +687,15 @@ function buildFocusSpecify(specifyTree) {
     if (header) parts.push(header)
   }
 
-  const hasNewStructure =
-    findByKey(specifyTree, 'overview') ||
-    findByKey(specifyTree, 'productDecisions') ||
-    findByKey(specifyTree, 'capabilities') ||
-    findByKey(specifyTree, 'businessObjects')
-  const sectionKeys = hasNewStructure
-    ? ['overview', 'productDecisions', 'capabilities', 'businessObjects']
-    : ['executiveSummary', 'userScenarios', 'businessRules', 'acceptanceCriteria']
-  for (const key of sectionKeys) {
+  for (const key of ['overview', 'productDecisions', 'capabilities', 'businessObjects']) {
     const section = findByKey(specifyTree, key)
     if (section) {
       parts.push(renderNode(section))
     }
   }
+
+  const acIndex = renderAcceptanceCriteriaIndex(extractAcceptanceCriteriaIndex(specifyTree))
+  if (acIndex) parts.push(acIndex)
 
   if (parts.length <= 1) return null
   return parts.filter(Boolean).join('\n\n---\n\n')
@@ -723,7 +711,7 @@ function buildFocusArchive(specifyTree, planTree) {
 
   const parts = []
 
-  // ── Specify 部分：Section 1 (Executive Summary) ──
+  // ── Specify 部分：Requirement Overview ──
   if (specifyTree) {
     const h1 = specifyTree.children.find((n) => n.level === 1)
     if (h1) {
@@ -732,7 +720,7 @@ function buildFocusArchive(specifyTree, planTree) {
       if (header) parts.push(header)
     }
 
-    const summary = findByKey(specifyTree, 'overview') || findByKey(specifyTree, 'executiveSummary')
+    const summary = findByKey(specifyTree, 'overview')
     if (summary) {
       parts.push(renderNode(summary))
     }
@@ -779,8 +767,8 @@ function buildFocusArchive(specifyTree, planTree) {
 }
 
 /**
- * 从 specify.md 全文解析「验收标准」章节中的 Markdown 任务列表，计算 AC 残差。
- * 统计行形如 `- [ ] …` / `- [x] …`（含 `*` 列表）；Total − Passed = remaining。
+ * 从最新 specify.md 的 Capabilities 中解析 AC 索引。
+ * 最新格式不在 specify.md 内维护 checkbox 状态；AC 执行残差由 plan task/gate 表达。
  * @param {string} specifyContent
  * @returns {{ acTotal: number, acPassed: number, remaining: number, residualItems: string[] }}
  */
@@ -793,32 +781,8 @@ function computeSpecifyAcceptanceResidual(specifyContent) {
   } catch {
     return empty
   }
-  const section = findByKey(tree, 'acceptanceCriteria')
-  if (!section) return empty
-  const text = renderNode(section)
-  const lines = text.split('\n')
-  /** 勾选框内为 x/X 视为通过；Refused/其他非 x 视为未满足 */
-  const taskRe = /^\s*[-*]\s+\[([^\]]+)\]\s*(.*)$/
-  let acTotal = 0
-  let acPassed = 0
-  const residualItems = []
-  for (const line of lines) {
-    const m = line.match(taskRe)
-    if (!m) continue
-    acTotal++
-    const marker = String(m[1] || '').trim()
-    const markerLc = marker.toLowerCase()
-    const label = String(m[2] || '').trim()
-    const isPassed = markerLc === 'x'
-    if (isPassed) {
-      acPassed++
-    } else {
-      const short = label.length > 500 ? `${label.slice(0, 500)}…` : label
-      if (short) residualItems.push(short)
-    }
-  }
-  const remaining = acTotal - acPassed
-  return { acTotal, acPassed, remaining, residualItems }
+  const acTotal = extractAcceptanceCriteriaIndex(tree).length
+  return { acTotal, acPassed: acTotal, remaining: 0, residualItems: [] }
 }
 
 module.exports = {

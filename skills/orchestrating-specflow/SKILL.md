@@ -98,7 +98,10 @@ flowchart TB
 
 ## 架构师反向打回（强制门禁，含接口/对接文档补全）
 
-**Iron Law：** 只要存在未闭合澄清（Markdown CQ 或 `.temp/clarifications.json`），引擎 **全局**返回 `interaction_required`，**先于** Plan / Implement / Archive。编排 **MUST** 先 `AskQuestion` 或等价收集用户决策；**STRICTLY PROHIBITED** 跳过澄清、由主对话代答、或继续派发 plan/implement。
+**Iron Law：** Specify 阶段澄清的单一真相源是 `.temp/clarifications.json`。只要其中存在未闭合澄清，引擎 **全局**返回 `interaction_required`，**先于** Plan / Implement / Archive。编排 **MUST** 先 `AskQuestion` 或等价收集用户决策；**STRICTLY PROHIBITED** 跳过澄清、由主对话代答、或继续派发 plan/implement。
+
+- **澄清回答写回（强制顺序）**：用户回答 AskQuestion 后，编排层必须调用 `manage-state.cjs answer-clarification [workspaceRoot] <需求号> <cqId> "<answer>"` 写回 `.temp/clarifications.json`，然后重新运行引擎。编排层不得直接派发 `specflow-specify`，不得把答案只写在聊天上下文里。
+- **澄清闭合后**：引擎检测到 json 全部闭合后，会自动派发 `specflow-specify`，并在 dispatch context 中注入已闭合答案摘要。Agent 只能读取 json / context 中的 `answer`，不得根据对话历史猜测答案。
 
 - **Plan 前架构评审（机器顺序）**：尚无 `plan.md` 且规格已就绪时，引擎 **先** `dispatch` **`specflow-specify-review`**（`agents/specflow-specify-review.md`）。无阻塞则子代理执行 `manage-state.cjs ack-specify-review <confirmed|mock_allowed|not_required>`，写入 `gates.json: plan.readiness_review`（兼容写旧 state）；**之后**才可能出现 `confirm_start_plan`，再 `specflow-plan`。`specify.md` 变更导致快照不一致时，须重新评审。有阻塞则必须生成技术澄清状态，并执行 `mark-specify-review-blocked`；未闭合前不允许进入 Plan。
 - **机制**：`specflow-plan` 按 `agents/specflow-plan.md` 生成技术澄清状态（接口文档缺失、对接信息不足、**接口/字段依据不足**等）并结束、不写 plan → 下一轮引擎 `interaction_required` 或 block，直至闭合。

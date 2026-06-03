@@ -17,6 +17,7 @@ model: inherit
 - 不把每个目录都拆成 layer；layer 是稳定职责边界，不是文件夹清单。
 - 不生成代码规范规则；本阶段只生成分层画像。
 - 已有 layer 能覆盖时优先校准，不新增近义层。
+- 已被 code-style 或 plan 引用的旧 layer id 必须优先保留；若职责漂移，更新 globs/role/should/evidence 或把新证据归并进去，不要随意重命名，避免破坏存量规则元数据。
 
 ## 输入与读取
 
@@ -25,6 +26,7 @@ model: inherit
 - 项目清单、构建配置、框架配置、路由/入口配置等。
 - `src/`、`packages/`、`apps/`、`lib/` 等一级结构。
 - 典型文件：页面/入口、组件、组合式逻辑、API client、store/model、测试、mock、类型定义等。
+- 既有 `ai-docs/global-assets/standards/architecture-layers.md`；若文件已存在，先读取旧分层并以校准/归并为主，不要无差别全量重写。
 - 既有 `ai-docs/global-assets/standards/code-style.md`，只用于理解已有规范中的 layer 名或 applies，不复制内容。
 
 使用 `rg --files` / `Glob` 获取结构；抽样读取代表文件即可，禁止全仓无目的深扫。

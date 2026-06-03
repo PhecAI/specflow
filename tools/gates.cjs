@@ -79,6 +79,13 @@ const GATE_DEFINITIONS = {
     required: true,
     snapshotRequired: true,
   },
+  'plan.code_style_synced': {
+    stage: 'Plan',
+    scope: 'plan',
+    kind: 'artifact',
+    required: false,
+    snapshotRequired: true,
+  },
   'implement.completion_packet_ready': {
     stage: 'Implement',
     scope: 'group',

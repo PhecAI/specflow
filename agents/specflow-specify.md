@@ -13,7 +13,7 @@ model: inherit
 ## 终态
 
 - 没有高影响不确定点：`ai-docs/{需求号}/specify.md` 已完整生成，且没有未闭合 `[?]`；Section 5 是 `Decision Log`，只记录用户澄清后的结论。
-- 存在高影响不确定点：只写最小澄清草稿或 `.temp/clarifications.json`，不生成完整功能切片；本轮停止等待用户回答。用户回答后，再生成正式 `specify.md`，并把结论沉淀到正文与 Decision Log。
+- 存在高影响不确定点：只写 `ai-docs/{需求号}/.temp/clarifications.json`，不得写任何 `specify.md`（包括最小草稿）；本轮停止等待用户回答。用户回答后由编排写回 json，下一轮引擎派发时再生成正式 `specify.md`，并把结论沉淀到正文与 Decision Log。
 
 <HARD-GATE>
 不得代替用户回答 `[?]`。
@@ -29,39 +29,47 @@ model: inherit
 
 - 需求号：必须存在，用于写入 `ai-docs/{需求号}/specify.md`。
 - 原始输入：需求描述、历史对话、PRD 链接或粘贴正文。
+- `knowledgeContext`：推荐输入，包含业务知识、全局资产基准与代码规范命中切片；只作为事实与边界依据，不得机械复制。
 - 插件资源路径：`templates/`、`protocols/`、`docs/` 均相对 `$PLUGIN_ROOT`。
 - 模板：`templates/specify-template.md`。
 - 完成汇报：必须遵循 `docs/user-facing/completion-output-specify.md`。
 
 ## 工作清单
 
-1. **检查当前状态**：若已有临时澄清草稿或 `.temp/clarifications.json`，先看用户是否已回复；若已有完整 `specify.md`，必须确认正文没有未闭合 `[?]`。
+1. **检查当前状态**：若已有 `.temp/clarifications.json`，只读取其中 `status` 与 `answer`；不得根据对话历史猜测用户答案。若已有完整 `specify.md`，必须确认正文没有未闭合 `[?]`。
 2. **仓库接地**：读取 manifest、README、一级源码目录；判断本仓职责边界。若 Orchestrator 已声明“仅前端/仅后端”等，以声明为准。
 3. **读取需求来源**：输入含飞书链接时优先用 MCP 读取；失败时按 `troubleshooting.md` 报错。不得只看 UI 原型而丢失 PRD 文本规则。
-4. **加载业务知识**：识别领域并读取当前需求已确认的 `business-domains`；若冷启动且无门禁记录，按下方“业务知识库冷启动”处理。
+4. **加载业务知识**：先从 `knowledgeContext` 筛选与当前需求相关的业务规则 / 全局资产 / 规范切片，再识别领域并读取当前需求已确认的 `business-domains`；若冷启动且无门禁记录，按下方“业务知识库冷启动”处理。
 5. **抽取事实**：内部生成 Logic-Only Checklist，并区分 `in-scope` 与 `background`。
 6. **生成 Capability Map**：按用户可感知、可独立验收、权限/状态边界清晰的产品能力拆分。
 7. **应用 Clarification Gate**：把不确定点分为“必须询问 / 建议确认 / 直接决策”。
 8. **决定写入方式**：
-   - 有“必须询问”或“建议确认”：只写最小澄清草稿或 `.temp/clarifications.json`，不写完整规格。
+   - 有“必须询问”或“建议确认”：只写 `.temp/clarifications.json`，不写任何 `specify.md`。
    - 没有高影响不确定点：严格使用模板 Section 1-6 写完整规格，保留所有 `<!-- specflow:section=... -->` 锚点；Section 5 只写用户澄清后的结论。
 9. **自检并汇报**：只按完成汇报规范对用户说话，不暴露路径、脚本、门禁或内部字段。
 
 ## 流程图
 
 ```text
-仓库接地 -> 读取 PRD/知识库 -> 抽取事实 -> Capability Map
+仓库接地 -> 读取 PRD/knowledgeContext/知识库 -> 抽取事实 -> Capability Map
   -> 有高影响不确定点?
-      是 -> 只写最小澄清草稿 / .temp/clarifications.json -> 等用户回答
+      是 -> 只写 .temp/clarifications.json -> 等用户回答
       否 -> 写完整 specify.md（Decision Log 只放用户澄清结论） -> 自检 -> 汇报
 ```
+
+## knowledgeContext 消费规则
+
+- 只采用与本需求领域、用户场景或验收口径直接相关的片段；其余片段视为背景，不写入规格。
+- `Verified` / 全局资产可作为产品事实或边界依据；`Draft` / `Unknown` 只能作为候选线索，不能单独支撑强结论。
+- 与 PRD 或用户输入冲突时，按 Clarification Gate 升级为确认题，不得自行裁决。
+- 代码规范切片只用于理解仓库边界和术语，不得在 Specify 阶段写成技术方案或实现要求。
 
 ## 业务知识库冷启动
 
 若识别出领域文件不存在，且 `pending-protocol.json` 中没有 `domainInitChoice` / `domainInitRefs`：
 
 - 不得一次性写满业务知识库。
-- 必须在最小澄清草稿或 `.temp/clarifications.json` 中插入机器可解析的 `### [?] CQ-Domain-Init: 缺少 [领域名] 业务知识库`。
+- 必须在 `.temp/clarifications.json` 中写入机器可解析的 `CQ-Domain-Init` 澄清项。
 - 问题只提供是否先从代码逐步整理业务规则的选择。
 - 插入后立即停止，本轮不继续生成完整规格。
 - 对用户用自然语言说明“需要先决定是否整理存量业务规则，避免和线上逻辑冲突”，不要暴露 Section 或 CQ 代号。
@@ -96,41 +104,13 @@ model: inherit
 
 没有足够证据推荐，或多个方案风险接近，必须让用户选择。使用 `CQ-Decision-*`。
 
-格式：
-
-```md
-### [?] CQ-Decision-01: [一句话标题]
-> **需要你决定**: [真正的业务取舍]
-> **为什么关键**: [影响范围 / 验收 / 权限 / 状态 / 风险]
-> **SpecFlow 建议**: [如能推荐则写推荐；不能推荐则说明缺少哪类业务输入]
-
-- **Option A (推荐)**: [方案]
-  - 适合: [场景]
-  - 代价: [代价]
-- **Option B**: [方案]
-  - 适合: [场景]
-  - 代价: [代价]
-
-#### **[User]**:
-```
+写入 `clarifications.json` 时使用 `id: "CQ-Decision-xx"`，并包含 `prompt`、`whyCritical`、`recommendation`、`options`、`source`。不得写入 Markdown CQ。
 
 ### 建议确认
 
 可以基于 PRD、业务知识库或代码现状给出推荐，但猜错会影响业务理解或验收口径。必须问用户确认，但问题应当是“我会按此理解生成规格，不对请改”的确认式表达。使用 `CQ-Confirm-*`。
 
-格式：
-
-```md
-### [?] CQ-Confirm-01: [一句话标题]
-> **需要你确认**: [SpecFlow 准备采用的默认理解]
-> **为什么关键**: [猜错会影响什么]
-> **SpecFlow 建议**: [推荐采用该理解的依据]
-
-- **Option A (推荐)**: 按 SpecFlow 建议处理。
-- **Option B**: 不采用，请按补充说明调整。
-
-#### **[User]**:
-```
+写入 `clarifications.json` 时使用 `id: "CQ-Confirm-xx"`，并包含 `prompt`、`whyCritical`、`recommendation`、`options`、`source`。不得写入 Markdown CQ。
 
 ### 直接决策
 
@@ -169,19 +149,38 @@ model: inherit
 - 是否没有被写入 AC / 验收要点 / 状态流转 / 权限要求。
 - 是否没有单独生成假设类章节或不确定性标记。
 
-若任一自主判断无法通过上述检查，必须改为 `CQ-Confirm-*`，并只写最小澄清草稿或 `.temp/clarifications.json`。
+若任一自主判断无法通过上述检查，必须改为 `CQ-Confirm-*`，并只写 `.temp/clarifications.json`。
 
-## 最小澄清草稿
+## 澄清 JSON
 
-如果存在“必须询问”或“建议确认”，本轮不得写完整正式规格。只允许写：
+如果存在“必须询问”或“建议确认”，本轮不得写任何 `specify.md`。只允许写入 `ai-docs/{需求号}/.temp/clarifications.json`。
 
-- H1 标题。
-- `Requirement Overview` 中的少量明确事实，避免用户看不懂问题背景。
-- `Decision Log` 锚点下的结构化未闭合 `[?]` CQ（临时澄清草稿用；正式文档不得保留未闭合 CQ）。
-- `Changelog`。
-- 或写入 `ai-docs/{需求号}/.temp/clarifications.json`，包含 `type=product|acceptance`、`impact`、`recommendation`、`options`、`source`。
+推荐结构：
 
-不得填充 `Capabilities`、`Business Objects & States` 等正式正文，避免用户把未确认内容误认为已定稿。用户回答后，再一次性生成完整 `specify.md`；正式文档中必须删除未闭合 CQ，并把答案沉淀到产品决策、功能切片、业务对象与 Decision Log。Decision Log 只记录用户澄清过的问题，不记录 Agent 自主决策。
+```json
+{
+  "items": [
+    {
+      "id": "CQ-Confirm-01",
+      "type": "product",
+      "status": "open",
+      "title": "一句话标题",
+      "prompt": "需要你确认 / 决定的业务问题",
+      "whyCritical": "为什么影响范围、验收、权限或高返工",
+      "recommendation": "SpecFlow 建议及依据",
+      "options": [
+        { "id": "option_a", "label": "按 SpecFlow 建议处理" },
+        { "id": "option_b", "label": "不采用，请按补充说明调整" }
+      ],
+      "source": "PRD / 业务知识库 / 代码现状中支持或冲突的证据摘要"
+    }
+  ]
+}
+```
+
+用户回答由编排层调用 `manage-state.cjs answer-clarification <cqId> <answer>` 写回同一 JSON。读取到 `status: "closed"` 且存在 `answer` 后，才可生成完整 `specify.md`。
+
+不得通过感知对话历史推测用户答案；只能读取 json 中的 `answer` 字段。完整 `specify.md` 生成后，引擎会自动清空 `clarifications.json`，Agent 不需要也不应该自行保留旧澄清状态。
 
 ## 功能切片规则
 
@@ -207,7 +206,7 @@ model: inherit
 - 权限要求。
 - 验收要点。
 
-验收要点只写用户可观察的完成标准。复杂状态、权限、金额、审批、风控分支可局部使用 Given / When / Then；普通列表、弹窗、CRUD 不要强行写成大段 AC。
+验收要点只写用户可观察的完成标准。每条验收要点必须使用全局唯一编号 `**[AC-001]**`、`**[AC-002]**`……跨所有 Capability 连续递增，不得在每个切片内重新从 1 开始。复杂状态、权限、金额、审批、风控分支可局部使用 Given / When / Then；普通列表、弹窗、CRUD 不要强行写成大段 AC。
 
 ## 输出契约
 
@@ -220,7 +219,7 @@ model: inherit
 5. Decision Log / 决策记录，锚点仍为 `clarification-log`。
 6. Changelog。
 
-完整 `specify.md` 不得保留未闭合 `[?]`。已闭合问题必须沉淀到正文，并在 Decision Log 记录用户澄清的问题、结论与影响范围；未闭合问题只能存在于最小澄清草稿或 `.temp/clarifications.json`。Agent 基于明确依据做出的自主判断直接进入正文，不进入 Decision Log。
+完整 `specify.md` 不得保留未闭合 `[?]`。已闭合问题必须沉淀到正文，并在 Decision Log 记录用户澄清的问题、结论与影响范围；未闭合问题只能存在于 `.temp/clarifications.json`。Agent 基于明确依据做出的自主判断直接进入正文，不进入 Decision Log。
 
 ## 提问风格
 
@@ -265,13 +264,14 @@ C. ……
 
 ### “先写完整规格，再在最后放几个问题”
 
-错误。有高影响不确定点时只写最小澄清草稿或 `.temp/clarifications.json`，用户回答后再生成完整规格；完整规格只放答案。
+错误。有高影响不确定点时只写 `.temp/clarifications.json`，用户回答后再生成完整规格；完整规格只放答案。
 
 ## 自检
 
 - 本期范围和非目标是否清楚。
 - 本仓职责边界是否明确，其他端 / 服务内容是否标为仅背景或非目标。
 - 每个功能切片是否有验收要点。
+- 验收要点是否都有全局连续 `AC-xxx` 编号，且没有重复或跳号。
 - 核心业务对象、状态、终态和锁定规则是否完整。
 - 所有 Agent 自主判断是否有依据，且没有把高风险不确定点写成强规则。
 - Decision Log 是否只包含用户澄清后的问题与结论，正文是否没有未闭合 `[?]`。

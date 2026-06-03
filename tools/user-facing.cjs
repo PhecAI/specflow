@@ -241,7 +241,7 @@ function buildUserFacing(result) {
       })
     }
     case 'dispatch_array': {
-      const agents = Array.isArray(sa.agents) ? sa.agents : []
+      const agents = Array.isArray(sa.items) ? sa.items : (Array.isArray(sa.agents) ? sa.agents : [])
       const phaseName = mapPhaseToChinese(phase)
       const names = agents
         .map((a) => mapAgentToUserTitle(a && a.agent, a && a.mode))
@@ -368,7 +368,7 @@ function buildDispatchPreviewMarkdown(workspaceRoot, requirementId, scriptsDir) 
           data && data.kind === 'dispatch_array'
             ? {
                 type: 'dispatch_array',
-                agents: Array.isArray(data.items) ? data.items : [],
+                items: Array.isArray(data.items) ? data.items : [],
               }
             : {
                 type: 'dispatch',

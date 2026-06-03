@@ -19,8 +19,8 @@
  * - domainInitChoice: 尚无 specify.md 时用户对「业务知识库」策略的选择：scan=先扫代码逐步生成，skip=本次不生成
  * - domainInitRefs: scan 时登记的领域身份（上限 8），格式为 <scope>::<slug>，例如 services/order::payment
  * - domainInitCandidateRefs: agent 在 S1 提交的领域身份候选列表（尚未确认，等待 S2 yes/no 采纳）
- * - residualItems: 由脚本根据 specify.md「验收标准」中未勾选 AC 行动态计算，勿手改
- * - acTotal / acPassed: 同上章节内 `- [ ]` / `- [x]` 计数；remaining = acTotal − acPassed（与 residualItems.length 一致当有文案时）
+ * - residualItems: 最新 specify.md 不维护 AC checkbox；未闭环项由 plan task/gate 表达，本字段仅保留状态快照形态
+ * - acTotal / acPassed: 由 Capabilities 中的全局 AC 索引计算；latest specify 自身不表达未通过状态
  * - residual: 结构化残差（unmetAcCount / failedTestsCount / openGatesCount / missingEvidencesCount / totalScore），由 residual-metrics 写入
  * - metricsHistory: 引擎轮次快照 [{ turn, totalResidual, at? }]（仅引擎跑完追加，最多 48 条）
  * - engineTurn: 引擎残差审计序号（每轮引擎成功落盘残差后 +1）

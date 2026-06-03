@@ -149,7 +149,9 @@ function buildQuestionProgress({ phase, requirementLabel, question, questions, s
 function buildDispatchProgress({ phase, requirementLabel, suggestedAction }) {
   const sa = suggestedAction || {}
   const isBatch = sa.type === 'dispatch_array'
-  const agents = isBatch && Array.isArray(sa.agents) ? sa.agents : []
+  const agents = isBatch
+    ? (Array.isArray(sa.items) ? sa.items : (Array.isArray(sa.agents) ? sa.agents : []))
+    : []
   const names = isBatch
     ? agents.map((a) => mapAgentToUserTitle(a && a.agent, a && a.mode)).filter(Boolean)
     : [mapAgentToUserTitle(sa.agent, sa.mode)]

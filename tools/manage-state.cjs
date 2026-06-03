@@ -8,6 +8,8 @@
  *   set-archive-anchor  — 写入 archive.user_anchor gate（用户主动确认归档后调用；state 镜像仅兼容旧流程）
  *   clear-archive-anchor — 清理归档兼容 state 并阻断 Archive gates
  *   set-code-style-explored — 兼容旧流程；当前主流程不再用它作为 Plan 前门禁
+ *   ack-code-style-sync — 记录当前 plan.md 快照对应的需求级 code-style 增量已同步完成（写入 gates.json: plan.code_style_synced）
+ *   recalibrate-layers — 清空全局 architecture-layers.md 的 Layers 段，并重置 init.architecture_layers 门禁
  *   set-active-group <groupId> [--auto] — 设置当前活跃的 Group ID；**--auto** 开启自动托管（`autoProceedGroups=true`，后续 Group 边界免 confirm）；不带 --auto 会清除自动托管
  *   mark-task <taskId> <status> [evidence] — 变更 plan.md 中指定任务的状态（含转换校验与日志）
  *     status: pending | ready-for-qa | failed | completed
@@ -24,6 +26,7 @@
  *   ack-specify-review [confirmed|mock_allowed|not_required] — 记录架构师已完成对 specify 的评审且无阻塞（写入 gates.json: plan.readiness_review；兼容写入旧 state）
  *   mark-specify-review-blocked [reason] — 记录技术前置评审阻塞（写入 gates.json: plan.readiness_review=blocked；仍应生成技术澄清状态）
  *   ack-auto-clarifications — 记录用户已审阅并确认自动解决的澄清（写入 autoClarificationAckMtime = 当前 specify.md mtime）
+ *   answer-clarification <cqId> <answer> — 将 .temp/clarifications.json 中对应澄清写入 answer 并标记 closed
  *   set-domain-init-pref <scan|skip> [领域身份] — 记录业务知识库领域初始化结果。scan 时必须提供领域身份（如 services/order::payment，支持逗号分隔），写入 domainInitRefs；并清空 domainInitCandidateRefs。skip 时清除所有领域字段
  *   set-domain-init-candidates <ref_csv> — S1 阶段：agent 分析项目后提交领域身份候选（逗号分隔），写入 domainInitCandidateRefs；引擎下一轮基于候选生成 N 道 yes/no 采纳题
  *   clear-domain-init-candidates — 清空 domainInitCandidateRefs（用于反悔 / 重新提交）
@@ -38,6 +41,7 @@ const {
   passGate,
   blockGate,
   skipGate,
+  resetGate,
   fileSnapshot,
 } = require('./gates.cjs')
 const { syncResidualToState } = require('./residual-metrics.cjs')
@@ -59,10 +63,13 @@ const ACTIONS = [
   'set-domain-merged',
   'set-knowledge-reviewed',
   'set-code-style-explored',
+  'ack-code-style-sync',
+  'recalibrate-layers',
   'ack-specify-before-plan',
   'ack-specify-review',
   'mark-specify-review-blocked',
   'ack-auto-clarifications',
+  'answer-clarification',
   'set-domain-init-pref',
   'set-domain-init-candidates',
   'clear-domain-init-candidates',
@@ -194,6 +201,83 @@ function safeReadJson(filePath, fallback) {
   }
 }
 
+function normalizeClarificationEntries(raw) {
+  if (!raw) return []
+  if (Array.isArray(raw)) return raw
+  if (Array.isArray(raw.items)) return raw.items
+  const out = []
+  for (const key of ['product', 'acceptance', 'technical', 'questions']) {
+    if (Array.isArray(raw[key])) {
+      for (const item of raw[key]) out.push(item)
+    }
+  }
+  return out
+}
+
+function clarificationIdOf(item, idx) {
+  return String(
+    (item && (item.id || item.cqId)) ||
+      `clarification_${idx + 1}`,
+  )
+}
+
+function isClarificationClosed(item) {
+  if (!item || typeof item !== 'object') return true
+  const status = String(item.status || item.state || '').toLowerCase()
+  if (['closed', 'resolved', 'done'].includes(status)) return true
+  return (
+    item.answer != null ||
+    item.userAnswer != null ||
+    item.resolution != null ||
+    item.decision != null
+  )
+}
+
+function writeClarificationAnswer(dir, cqId, answer) {
+  const clarificationPath = path.join(dir, '.temp', 'clarifications.json')
+  if (!fs.existsSync(clarificationPath)) {
+    fail(`clarifications.json 不存在: ${clarificationPath}`)
+  }
+  const raw = safeReadJson(clarificationPath, null)
+  if (!raw) fail('clarifications.json 无法解析')
+
+  const entries = normalizeClarificationEntries(raw)
+  if (entries.length === 0) fail('clarifications.json 中没有澄清条目')
+
+  let matched = null
+  let matchedId = ''
+  entries.forEach((item, idx) => {
+    if (matched) return
+    if (!item || typeof item !== 'object') return
+    const id = clarificationIdOf(item, idx)
+    const legacyId = item.cqId ? String(item.cqId) : ''
+    if (id === cqId || legacyId === cqId) {
+      matched = item
+      matchedId = id
+    }
+  })
+
+  if (!matched) {
+    fail(`未找到澄清项: ${cqId}`)
+  }
+
+  matched.status = 'closed'
+  matched.answer = answer
+  matched.answeredAt = new Date().toISOString()
+
+  fs.mkdirSync(path.dirname(clarificationPath), { recursive: true })
+  fs.writeFileSync(clarificationPath, JSON.stringify(raw, null, 2), 'utf-8')
+
+  const openItems = entries.filter((item) => !isClarificationClosed(item))
+  return {
+    ok: true,
+    id: matchedId,
+    allClosed: openItems.length === 0,
+    openCount: openItems.length,
+    path: clarificationPath,
+  }
+}
+
 function parseDomainRefList(input) {
   const raw = String(input || '')
   if (!raw.trim()) return []
@@ -206,6 +290,32 @@ function parseDomainRefList(input) {
     out.push(ref)
   }
   return out
+}
+
+function resetArchitectureLayersFile(workspaceRoot) {
+  const layersPath = path.join(
+    workspaceRoot,
+    'ai-docs',
+    'global-assets',
+    'standards',
+    'architecture-layers.md',
+  )
+  const fallbackHeader = [
+    '# Architecture Layers',
+    '',
+    '> 本文件描述当前项目自己的代码分层画像。SpecFlow 不预设前端/后端层名；由 agent 基于目录、配置、既有代码和规范生成并迭代维护。',
+    '> 初始化阶段只写低风险骨架；需求中发现的新分层先作为候选，归档评审通过后再稳定进入本文件。',
+    '',
+  ].join('\n')
+  const existing = fs.existsSync(layersPath) ? fs.readFileSync(layersPath, 'utf-8') : ''
+  const marker = existing.match(/^##\s+Layers\s*$/m)
+  const header = marker && typeof marker.index === 'number'
+    ? existing.slice(0, marker.index).replace(/\s+$/, '')
+    : (existing.trim() ? existing.trim() : fallbackHeader.trim())
+  const next = `${header}\n\n## Layers\n\n- (empty)\n`
+  fs.mkdirSync(path.dirname(layersPath), { recursive: true })
+  fs.writeFileSync(layersPath, next, 'utf-8')
+  return layersPath
 }
 
 function extractCodingStandardPatchesFromEvidence(evidence) {
@@ -743,6 +853,51 @@ function main() {
       )
       break
     }
+    case 'ack-code-style-sync': {
+      const planPath = path.join(dir, 'plan.md')
+      if (!fs.existsSync(planPath)) {
+        fail('plan.md 不存在，无法记录 code-style 同步状态')
+      }
+      const planSnapshot = fileSnapshot(workspaceRoot, path.join('ai-docs', requirementId, 'plan.md'))
+      const codeStylePath = path.join(dir, 'code-style.md')
+      const patchPath = path.join(dir, '.temp', 'coding-standard-patch.json')
+      const evidence = [
+        fs.existsSync(codeStylePath) ? `ai-docs/${requirementId}/code-style.md` : null,
+        fs.existsSync(patchPath) ? `ai-docs/${requirementId}/.temp/coding-standard-patch.json` : null,
+      ].filter(Boolean)
+      ensureGateResult(passGate(dir, 'plan.code_style_synced', {
+        stage: 'Plan',
+        scope: 'plan',
+        subject: `ai-docs/${requirementId}/code-style.md`,
+        snapshot: planSnapshot,
+        evidence: evidence.length > 0 ? evidence : [`ai-docs/${requirementId}/plan.md`],
+      }))
+      console.log(JSON.stringify({ ok: true, gate: 'plan.code_style_synced', snapshot: planSnapshot }, null, 2))
+      break
+    }
+    case 'recalibrate-layers': {
+      const layersPath = resetArchitectureLayersFile(workspaceRoot)
+      ensureGateResult(resetGate(dir, 'init.architecture_layers', {
+        stage: 'Init',
+        scope: 'global',
+        subject: 'ai-docs/global-assets/standards/architecture-layers.md',
+        reason: 'manual recalibration requested after unmapped technical signal',
+        evidence: 'architecture-layers Layers section cleared',
+      }))
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            architectureLayersPath: layersPath,
+            gate: 'init.architecture_layers',
+            status: 'pending',
+          },
+          null,
+          2,
+        ),
+      )
+      break
+    }
     case 'set-domain-init-pref': {
       const pref = (named['pref'] || extras[0] || '').trim().toLowerCase()
       if (pref !== 'scan' && pref !== 'skip') {
@@ -942,6 +1097,15 @@ function main() {
       }
       mergeState(dir, { autoClarificationAckMtime: mtimeMs })
       console.log(JSON.stringify({ ok: true, autoClarificationAckMtime: mtimeMs }, null, 2))
+      break
+    }
+    case 'answer-clarification': {
+      const cqId = (named['cq-id'] || named.cqId || named.id || extras[0] || '').trim()
+      const answer = (named.answer || named.value || extras.slice(1).join(' ') || '').trim()
+      if (!cqId) fail('answer-clarification 需要参数: <cqId>')
+      if (!answer) fail('answer-clarification 需要参数: <answer>')
+      const result = writeClarificationAnswer(dir, cqId, answer)
+      console.log(JSON.stringify(result, null, 2))
       break
     }
     case 'set-active-group': {

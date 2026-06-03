@@ -62,7 +62,7 @@ model: inherit
 
 **启动参数 (Prompt)**：
 
-- **需求号**：用于定位 `ai-docs/<需求号>/specify.md`。
+- **需求号**：用于定位 `ai-docs/<需求号>/plan.md` 与 `specify.md`。
 - **WorkspaceRoot**：用于定位全局规范与代码搜索范围。
 
 **执行规则 (Execution Rules)**：
@@ -88,13 +88,14 @@ model: inherit
 > **你关心**："这次会动哪几类文件（DTO/Service/Vue/Composable/Test/Migration/...）、动哪几层（接口层/服务层/视图层/状态层/持久层）"。
 > **你不关心**："需求要做什么功能、要展示什么字段、要加什么按钮"——那是 Plan 的事。
 
-1. 读取 `ai-docs/<需求号>/specify.md`，只提炼以下技术信号（**明确避开业务词**，任何含具体字段名/枚举值/按钮文案/模块业务名的都应忽略）：
+1. 优先读取 `ai-docs/<需求号>/plan.md`，提取 Roadmap Files、Test Strategy、SOP/Contract 中的技术层级信号，以及 Plan/QA Log 中显式写出的 `[CodeStyle]` / `[CodeStyle:override]` 候选。`specify.md` 只作为需求范围兜底，不得替代 plan。
+2. 从 `plan.md` / `specify.md` 只提炼以下技术信号（**明确避开业务词**，任何含具体字段名/枚举值/按钮文案/模块业务名的都应忽略）：
    - 涉及的层/模块**类型**（Controller / Service / Repository / View / Composition / Worker / Cron / RPC client / SDK / DTO / Migration …）
    - 涉及的接口**风格**（HTTP REST / GraphQL / RPC / 消息）
    - 数据持久化与外部依赖**类型**（DB schema 变更、第三方 SDK、新协议）
    - 安全/权限/审计/日志**维度**的诉求（例如"新增对外接口"→ 指向 API 规范、错误码规范、日志规范）
-2. 把技术信号映射到 `architecture-layers.md` 中已存在的 layer；无法映射时，只记录为 `unmapped technical signal`，不要临时发明业务 layer。
-3. 读取 `ai-docs/global-assets/standards/code-style.md`（若不存在视为空）；用于去重判断，禁止复制到需求级 code-style。
+3. 把技术信号映射到 `architecture-layers.md` 中已存在的 layer；无法映射时，只记录为 `unmapped technical signal`，不要临时发明业务 layer。
+4. 读取 `ai-docs/global-assets/standards/code-style.md`（若不存在视为空）；用于去重判断，禁止复制到需求级 code-style。
 
 **自检**：如果你写下的 touched layer 里出现了具体业务目录（如 `content-library`、`order-detail`），请后退一步——回到 `architecture-layers.md` 选择或新增抽象分层。
 
@@ -257,13 +258,15 @@ touched:
 - **不要**把全局已存在或已引用的规则写入 patch（避免重复回流全局）。
 - 已有 `coding-standard-patch.json` 时，**合并**而非覆盖（同 `kind::section::content` 视为同条；不同 kind 互不覆盖；`applies` 数组按集合合并）。
 
-### Phase 4: 状态回写（兼容旧流程）
+### Phase 4: 状态回写
 
-若由旧编排显式调用，完成产出后可调用脚本回写状态；当前主流程不再把 code-style explorer 作为 Plan 前门禁：
+完成产出后，执行以下命令记录本次 plan 快照已同步完成（engine 凭此跳过重复提炼）：
 
 ```bash
 PLUGIN_ROOT=/path/to/specflow
-node "$PLUGIN_ROOT/tools/manage-state.cjs" set-code-style-explored [workspaceRoot] <需求号>
+node "$PLUGIN_ROOT/tools/manage-state.cjs" ack-code-style-sync [workspaceRoot] <需求号>
 ```
+
+若由 QA/Review 触发的增量补充（非 engine 显式派发），也应调用此命令刷新 plan 快照绑定。
 
 **完成时（MUST）**：向用户**简短**汇报：「已为本次需求对齐代码规范：沿用 N 条全局规则，新增 M 条，覆盖 K 条」。**不要**贴大段规则原文；**禁止**仓库路径、脚本名、引擎字段名（见 `VOICE.md` 第 2.1 节）。

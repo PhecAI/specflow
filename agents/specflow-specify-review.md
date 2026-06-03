@@ -32,7 +32,7 @@ model: inherit
 
 **动作**：
 
-1. 优先写入 `ai-docs/{需求号}/.temp/clarifications.json` 的 `technical` 项；如当前引擎仍需 Markdown CQ 兼容，可只写最小技术澄清草稿，不得把未闭合技术问题散落到完整 `specify.md` 正文。问题必须遵循决策题风格，包含：
+1. 写入 `ai-docs/{需求号}/.temp/clarifications.json` 的 `technical` 项；不得把未闭合技术问题写入 `specify.md` 正文。问题必须遵循决策题风格，包含：
    - `需要你决定`: 在接口/字段/对接依据未确认时，本次开发希望如何推进。
    - `为什么关键`: 说明会影响 Contract、Mock 边界、验收范围、返工成本或对接风险。
    - `SpecFlow 建议`: 给出推荐选项与一句话理由。

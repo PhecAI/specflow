@@ -31,7 +31,7 @@
 - **状态回写策略**：默认使用 `manage-state.cjs mark-group <groupId> ready-for-qa` 进行整组送测（一次门禁校验）；仅在同组混合结果等特殊场景回退 `mark-task` 按任务标记。
 - **状态机硬门禁**：`ready-for-qa` 转换由 `manage-state.cjs` 强制校验 `implement.completion_packet_ready`。缺少完整 Completion Packet 时，命令会失败并在 `gates.json` 写入 `blocked`；不得用自然语言确认或手工改 checkbox 绕过。
 - **focusPlan**：MUST 将 `suggestedAction.focusPlan` 透传至 `context.focusPlan`。子代理**仅**使用 focusPlan 完成本 Group 任务，**禁止**为完成本 Group 而读取 specify.md 或 plan.md 全文（以节省上下文与 Token）。
-- focusPlan 优先含当前 Task Group 的自足上下文：Goal / Depends on / User AC / Local Contract / Files / Test Strategy / Active Group 任务列表 / 最近失败或存证摘要。旧 plan 回退时才附带相关 Feature 与全局 Contract 摘要。
+- focusPlan 仅包含当前 Task Group 的自足上下文：Goal / Depends on / User AC / Local Contract / Files / Test Strategy / Active Group 任务列表 / 最近失败或存证摘要。Task Group 缺少这些字段时视为 plan 结构不达标，不再拼接全局 Feature / Contract 回退上下文。
 - **Test Strategy 是执行依据**：`[TDD]` 只是审计标签；实现时必须按当前 Group 的 Test Strategy 区分 TDD Units、Targeted Test、Mock Smoke、Static Diagnostics、Contract Check。
 - **Completion Packet 是 QA 交接依据**：标记 `ready-for-qa` 前，Implement MUST 在 Ready-for-QA 日志中写入结构化 `Completion Packet`。QA 默认执行 `QA Lite`，只审 `focusPlan + Completion Packet`，不重新读全文 plan、不重新设计测试。
 - **knowledgeContext**：MUST 参与实现决策，但不是“照单全收”。子代理需做二次筛选（适用/不适用），仅采用与当前任务相关的规则，并在 Log 中记录“采用了哪些知识规则 + 为什么”。
