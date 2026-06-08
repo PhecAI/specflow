@@ -1,52 +1,23 @@
 # SpecFlow
 
-SpecFlow 是一套**引擎驱动**的 **SDD（Spec-Driven Development）** AI Coding 流程，面向**大型团队日常迭代**。
+<p align="center">
+  <img src="assets/logo.png" alt="SpecFlow logo" width="180" />
+</p>
 
-- **核心：引擎驱动** — `specflow-engine` / `orchestrator` 读取 `ai-docs` 与状态机，输出 `suggestedAction`（能否推进、派发到哪一阶段、人机确认项）。澄清未闭合、评审未通过、未送测/未验收时**脚本级阻塞**，不是把流程写进 Prompt 碰运气。
-- **Harness 承载执行** — Skills、Agents、Hooks，负责「怎么做」；**「做什么、能不能做」由引擎说了算**。
-- **SDD 产物链** — 从 `specify.md` → `plan.md` → Roadmap 分组实现 → QA 证据 → 归档，规格与契约先于代码，变更与 implement 分轨。
+SpecFlow 是一套**引擎驱动**的 **SDD（Spec-Driven Development）** AI Coding 流程，面向大型团队的日常需求交付。
 
-全链路：**Specify → Plan → Implement → QA → Archive**，配合严格阶段门禁。
+- **Engine decides**：`specflow-engine` 读取 `ai-docs`、`.temp/gates.json` 与运行态，判断当前阶段、门禁和下一步动作。
+- **Harness executes**：Skills、Agents、Hooks 负责对话、写文档、编码、验收和归档，不自行越过引擎决策。
+- **Docs first**：从 `specify.md` 到 `plan.md`，再到 Roadmap Group 实现、QA 证据和归档，规格与契约先于代码。
+- **Change is separate**：需求、接口、字段、验收口径变化先走文档同步，再继续实现，避免边写边漂。
+
+主流程：**Init → Specify → Plan Readiness → Plan → Implement → QA → Archive**。
 
 ## Quickstart
 
-在支持的工具中启用 SpecFlow：
-
-| 平台                         | 状态      |
-| ---------------------------- | --------- |
-| [Cursor](https://cursor.com) | ✅ 已支持 |
-| 其他 IDE / CLI               | 🔜 规划中 |
-
-## How it works
-
-**引擎 + Harness 分工**：Harness（Agent / Skills / Hooks）负责对话、编码与阶段执行；**引擎**根据工作区 `ai-docs` 判定环节并门禁。Agent 解析引擎 JSON 后行动，而不是自行猜测「现在该写码还是该写规格」。
-
-从你描述一个需求开始，Agent **不会**默认直接改仓库里的代码。
-
-1. **先判定意图**：本轮是需求交付、规格/合约变更，还是与产品无关的技术排错？需求驱动场景下必须先运行 `specflow-engine` / `orchestrator`，依据 JSON 中的 `suggestedAction` 决策。
-2. **再绑定需求号**：可以尚无编号；引擎通过 `interaction_required` 引导选择或输入，产物写入业务项目的 `ai-docs/<需求号>/`（**不**随本插件仓库分发）。
-3. **Specify**：先闭合产品/验收澄清，再把模糊意图收敛为可验收的 `specify.md`；正式文档只保留答案，未闭合问题不得进入 Plan。
-4. **Plan**：在规格评审与代码规范评估通过后，产出 `plan.md`（设计、契约、Roadmap）。
-5. **Implement / QA**：按 Roadmap **Group** 推进实现；整组 `ready-for-qa` 后由验收子代理把关，通过才标记完成。
-6. **Change（并行轨）**：PRD、接口字段、契约变动走 `sync-document`，与 implement 链**互斥**——先同步文档，再继续实现。
-7. **Archive**：任务全部完成后归档，演进全局业务与规范资产。
-
-编排层在关键人机点使用 **AskQuestion**（或与引擎 `questions` 对齐的确认项）。**违反流程的字面步骤，等于违反流程的精神。**
-
-## Installation
-
-安装方式因宿主而异；若使用多个 IDE，需在各自环境中分别安装。
-
 ### Cursor
 
-**Marketplace（推荐）**
-
-1. 打开 Cursor **Marketplace**，搜索 **SpecFlow** 并安装。
-2. 执行 **Developer: Reload Window**。
-
-尚未上架时，可向 [Cursor 插件发布页](https://cursor.com/marketplace/publish) 提交本仓库：[github.com/PhecAI/specflow](https://github.com/PhecAI/specflow)。
-
-**从源码安装**
+源码安装：
 
 ```bash
 git clone https://github.com/PhecAI/specflow.git
@@ -54,92 +25,143 @@ cd specflow
 npm run install:local
 ```
 
-复制到 `~/.cursor/plugins/local/specflow` 后 Reload Window。详见 [docs/development.md](docs/development.md)。
+安装后执行 **Developer: Reload Window**；新会话会通过 `sessionStart` Hook 注入 `using-specflow` 总闸约束。
 
-### 环境要求
+### Requirements
 
-- **Node.js** ≥ 18（`tools/*.cjs` 编排脚本）
-- **Cursor Hooks**：`sessionStart` 脚本需 **bash**（macOS / Linux；Windows 建议 WSL）
+- Node.js >= 18
+- macOS / Linux shell；Windows 建议 WSL
 
-## The Basic Workflow
+## How It Works
 
-下列阶段由引擎与编排器衔接；**未满足门禁则不会派发下一阶段子代理**。
+1. **Init**：确定需求号，初始化 `ai-docs/global-assets`，校准 `architecture-layers.md`，确认业务领域。
+2. **Specify Preview**：正式成文前做产品/验收预审，高影响问题写入 `.temp/clarifications.json`。
+3. **Specify**：生成或更新 `specify.md`，正式规格只保留已闭合决策和可验收能力切片。
+4. **Plan Preview**：生成 `plan.md` 前做技术方案预审，接口、字段、权限、持久化等关键不确定点必须闭合。
+5. **Plan**：生成 Architecture 与 Roadmap Groups，并沉淀本需求新增的 code-style patch。
+6. **Implement**：按 Roadmap Group 派发实现，进入实现前需要当前 plan 快照授权。
+7. **QA**：整组 ready-for-qa 后验收，失败回到修复，成功后标记完成。
+8. **Archive**：Roadmap 全绿后先等待用户归档确认，再合并领域知识、评审知识/规范补丁并物理归档。
 
-1. **using-specflow** — 总闸。识别 PRD、验收点、接口字段、`ai-docs` 等需求驱动输入；**先跑引擎再行动**。可由 `sessionStart` Hook 自动注入上下文。
+所有关键状态写入 `ai-docs/<需求号>/.temp/gates.json`；`specflow-state.json` 仅保留运行态和旧字段兼容。
 
-2. **specflow-engine / orchestrator** — 读取 `ai-docs` 物理状态与 `specflow-state.json`，输出当前环节、`suggestedAction`（含 `dispatch`、`interaction_required`、`anchor` 等）。
+## Core Concepts
 
-3. **Init** — 需求初始化。确定需求号，初始化 `global-assets` 骨架，确认业务领域，确保 `architecture-layers.md` 存在。
+### Requirement Workspace
 
-4. **specifying-specflow** — Specify 阶段。先管理产品/验收澄清，再产出不含未闭合问题的 `specify.md`。
+业务项目中的需求产物位于：
 
-5. **Plan Readiness** — 技术方案准备。架构师级规格评审，技术澄清或放行；门禁状态进入 `.temp/gates.json`。
+```text
+ai-docs/<需求号>/
+  specify.md
+  plan.md
+  code-style.md
+  business-domains/
+  .temp/
+```
 
-6. **planning-specflow** — Plan 阶段。参考全局 `code-style` 与 `architecture-layers`，产出 `plan.md`；需求内 code-style 只记录增量。
+归档后进入：
 
-7. **implementing-specflow · qa-specflow** — 按 Group 实现与验收；`manage-state` / `verify` 驱动状态迁移。
+```text
+ai-docs/history/<year>/<quarter>/<需求号>/
+```
 
-8. **syncing-specflow-docs** — 需求/合约/方案变更。`sync-document` 更新 `specify` / `plan`，**禁止**与首轮 implement 混用。
+历史需求目录只保留精简后的 `specify.md` 与 `summary.md`。
 
-9. **archiving-specflow** — 归档。`archive.cjs` 搬运需求目录、更新历史索引、合并全局资产。
+### Gates
 
-**显式入口**：用户说「开始 Specflow 交付」时，使用 **`specflow`** 技能启动 implement 链（非 change 链）。
+SpecFlow 使用注册式 gate 阻止流程误推进，关键门禁包括：
 
-## What's Inside
+- `init.global_assets`
+- `init.architecture_layers`
+- `init.domain_refs`
+- `specify.preview`
+- `plan.readiness_review`
+- `plan.user_confirm_start`
+- `plan.implement_approved`
+- `implement.completion_packet_ready`
+- `qa.lite_evidence_ready`
+- `archive.user_anchor`
+- `archive.domain_merged`
+- `archive.knowledge_reviewed`
 
-### Skills Library
+`passed` 必须带 evidence，`blocked` 必须带 reason；需要快照的 gate 会校验当前文档是否已变化。
 
-| 技能                       | 作用                                      |
-| -------------------------- | ----------------------------------------- |
-| **using-specflow**         | 总闸：需求驱动场景默认启用                |
-| **specflow**               | 交付主线显式入口（implement 链）          |
-| **orchestrating-specflow** | 编排：解析引擎 JSON、派发子代理、人机确认 |
-| **specifying-specflow**    | Specify 阶段指引                          |
-| **planning-specflow**      | Plan 阶段指引                             |
-| **implementing-specflow**  | Implement 阶段指引                        |
-| **qa-specflow**            | QA 验收指引                               |
-| **syncing-specflow-docs**  | 文档同步（change 路径）                   |
-| **archiving-specflow**     | Archive 阶段指引                          |
+### Knowledge Loop
 
-### Agents
+- `business-domains/` 记录需求级业务知识，归档前由领域合并流程回流全局知识库。
+- `code-style.md` 只记录本需求新增或覆盖的规范，不复制全局规范。
+- `global-assets/standards/architecture-layers.md` 提供项目分层画像，供 code-style 按 layer 归类。
+- `merge-global-assets.cjs` 在归档确认后统一合并领域知识与代码规范资产。
 
-阶段子代理（独立上下文，由编排器 `dispatch`）：
+## Skills
 
-`specflow-specify` · `specflow-specify-review` · `specflow-code-style-explorer` · `specflow-plan` · `specflow-implement` · `specflow-qa` · `specflow-archive` · `specflow-domain-explorer` · `specflow-knowledge-reviewer` · `inventory-scanner`
+| Skill                    | Purpose                              |
+| ------------------------ | ------------------------------------ |
+| `using-specflow`         | 总闸：识别需求驱动场景并要求先跑引擎 |
+| `specflow`               | 显式启动交付主线                     |
+| `orchestrating-specflow` | 解析引擎输出、处理确认、派发子代理   |
+| `specifying-specflow`    | Specify 阶段指引                     |
+| `planning-specflow`      | Plan 阶段指引                        |
+| `implementing-specflow`  | Implement 阶段指引                   |
+| `qa-specflow`            | QA 验收指引                          |
+| `syncing-specflow-docs`  | 需求/接口/方案变更同步               |
+| `archiving-specflow`     | Archive 阶段指引                     |
 
-### Tools & Engine
+## Agents
 
-可执行脚本位于 `tools/`（需 Node ≥ 18）：
+阶段代理由引擎通过 `suggestedAction` 派发：
 
-| 脚本                  | 作用                                   |
-| --------------------- | -------------------------------------- |
-| `specflow-engine.cjs` | 环节判定、门禁、`interaction_required` |
-| `orchestrator.cjs`    | `implement` / `change` 编排入口        |
-| `gates.cjs`           | 统一门禁状态机（`.temp/gates.json`）   |
-| `manage-state.cjs`    | 运行态、Group、评审 ack 兼容入口       |
-| `sync-document.cjs`   | 结构化更新 specify / plan              |
-| `verify.cjs`          | 送测前校验                             |
-| `archive.cjs`         | 物理归档                               |
+- `inventory-scanner`
+- `specflow-architecture-layers`
+- `specflow-domain-explorer`
+- `specflow-specify-preview`
+- `specflow-specify`
+- `specflow-plan-preview`
+- `specflow-plan`
+- `specflow-code-style-explorer`
+- `specflow-implement`
+- `specflow-qa`
+- `specflow-knowledge-reviewer`
+- `specflow-archive`
 
-协议与模板：`protocols/`、`templates/`。运维与用户可见话术：`docs/`。
+## Tools
 
-### Hooks
+脚本位于 `tools/`，均支持 named flags 与兼容位置参数。
 
-`hooks/hooks.json` 在 **`sessionStart`** 注入 `using-specflow` 全文，保证新会话即具备总闸约束。
+| Script                    | Purpose                                 |
+| ------------------------- | --------------------------------------- |
+| `specflow-engine.cjs`     | 阶段识别、门禁判定、下一步动作输出      |
+| `orchestrator.cjs`        | `implement` / `change` 编排入口         |
+| `gates.cjs`               | 统一 gate 状态机                        |
+| `manage-state.cjs`        | 澄清回答、确认 ack、Group/Task 状态迁移 |
+| `sync-document.cjs`       | 同步 `specify.md` / `plan.md` 变更      |
+| `print-protocol.cjs`      | 输出 agent/human/task-prompt 协议视图   |
+| `render-user-facing.cjs`  | 将引擎 JSON 渲染为用户可见说明          |
+| `inventory-scan.cjs`      | 初始化全局资产与幂等创建领域文档        |
+| `code-style.cjs`          | 提取、过滤、渲染代码规范 patch          |
+| `merge-global-assets.cjs` | 归档确认后合并全局业务/规范资产         |
+| `archive.cjs`             | 物理归档、规格瘦身、历史索引更新        |
 
-## Philosophy
+## Repository Layout
 
-- **引擎驱动为先** — 流程真相在 `tools/*.cjs` 与状态机，不在聊天里的「我记得下一步」
-- **Harness 只做执行面** — 宿主上的 Skills / Agents / Hooks 服从引擎 `suggestedAction`，不越权改阶段
-- **SDD：规格先行** — 可验收规格与技术方案落盘后再实现；`ai-docs` 为单一事实来源
-- **变更与实现分离** — 改规格/契约走 sync；写代码走 implement，禁止混轨
-- **分组交付与证据** — Roadmap Group + QA 闭环；未送测、未验收、未闭合澄清，不得标记完成
+```text
+agents/       Stage-specific agent prompts
+skills/       User-facing skills and orchestration entry points
+tools/        Engine, state machine, parsers and asset merge scripts
+protocols/    Agent protocol contracts
+templates/    specify / plan / domain / code-style templates
+docs/         Full orchestration docs and user-facing copy
+hooks/        Cursor sessionStart hook
+tests/        Node test suite and layout guards
+assets/       Logo and static assets
+```
 
 ## License
 
-MIT License — 见 [LICENSE](LICENSE) 文件。
+MIT License，见 [LICENSE](LICENSE)。
 
 ## Links
 
-- **仓库**：https://github.com/PhecAI/specflow
-- **问题反馈**：https://github.com/PhecAI/specflow/issues
+- 仓库：https://github.com/PhecAI/specflow
+- Issues：https://github.com/PhecAI/specflow/issues
