@@ -57,6 +57,16 @@ test('specify-template: 使用功能切片结构，不再生成独立 AC 章节'
   assert.doesNotMatch(tpl, /^##\s+\d+\.\s+Acceptance Criteria/m)
 })
 
+test('plan-template: 只保留 architecture 与 roadmap 两个 Plan 锚点', () => {
+  const tpl = fs.readFileSync(path.join(ROOT, 'templates', 'plan-template.md'), 'utf8')
+  const anchors = [...tpl.matchAll(/specflow:section=([a-z-]+)/g)].map((m) => m[1])
+  assert.deepStrictEqual(anchors, ['architecture', 'roadmap'])
+  assert.doesNotMatch(tpl, /specflow:roadmap-status-overview/)
+  assert.doesNotMatch(tpl, /specflow:section=(contract|feature|execution-log|changelog)/)
+  assert.doesNotMatch(tpl, /AC 覆盖自检/)
+  assert.doesNotMatch(tpl, /Execution Log|Changelog/)
+})
+
 test('plan-parser: 新 Specify 结构可判定完整并进入 focusSpecify', () => {
   const md = `# Spec
 
@@ -64,9 +74,8 @@ test('plan-parser: 新 Specify 结构可判定完整并进入 focusSpecify', () 
 <!-- specflow:section=overview -->
 - **目标**: 完成素材管理。
 
-## Product Decisions & Boundaries
-<!-- specflow:section=product-decisions -->
-- **已确认产品决策**: 本期先支持 Mock 推进。
+- **关键产品决策**:
+  - 本期先支持 Mock 推进。
 
 ## Capabilities
 <!-- specflow:section=capabilities -->

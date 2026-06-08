@@ -3,10 +3,10 @@
 <!-- specflow:requirement=[需求号] -->
 <!--
 Plan 写作原则（架构师视角，单一 plan.md）：
-1. Implement 读 plan 即可开干：先建立心智模型（Goal/决策/目录），再给契约，最后给可执行 Task。
-2. 技术澄清在写 plan 之前完成；闭合结论写入「已确认技术决策」，plan 正文不写未闭合 [?]。
-3. Feature 写「做什么、测什么」；Roadmap 写「改哪个文件、怎么验」——避免两段重复粘贴。
-4. 后端未定时走 Mock 主线：Contract 先给 Mock 表 + 联调替换清单，不要每个接口重复「待确认」。
+1. Implement 读 plan 即可开干：§1 建立心智模型，§2 的每个 Group 都是自足执行单元。
+2. 技术澄清在写 plan 之前完成；闭合结论优先写入对应 Group 的 Local Contract / Files / Test Strategy。只有跨多个 Group、且不在 Roadmap 中自然闭合的非显然结论，才写入「已确认技术决策」。
+3. Group 是唯一落地单元：User AC / Local Contract / Test Strategy 都直接挂在 Group 下。
+4. 后端未定时走 Mock 主线：§1.4 只保留一句话级 Mock 心智模型，具体对接数据写入各 Group 的 Local Contract。
 -->
 
 ---
@@ -30,12 +30,11 @@ Plan 写作原则（架构师视角，单一 plan.md）：
 
 ### 1.3 已确认技术决策
 
-> 技术澄清（CQ-Tech / CQ-Contract）闭合后的结论汇总；Implement **以本表为准**，勿回查澄清过程。
+> 可选。只记录跨 Group 生效、且不会在 Implementation Roadmap 中完整体现的非显然技术结论。若所有结论已在各 Group 的 Local Contract / Files / Test Strategy / Verification Contract 中闭合，则写“无，技术结论已随 Group 内联”。
 
 | 项 | 决策 | 依据 |
 |----|------|------|
-| [例：接口策略] | [Mock 先行 / 正式契约] | [PRD / 用户 Option B / 存量 API] |
-| [例：片单来源] | [A 路 albumSuggest，禁止 B 路] | [specify + 知识库] |
+| [例：跨组状态归属] | [统一由某稳定 store/composable 承载，避免多 Group 各自维护] | [技术澄清 / 存量架构] |
 
 ### 1.4 架构与分层
 
@@ -52,99 +51,26 @@ Plan 写作原则（架构师视角，单一 plan.md）：
   - **不得** [禁止的行为]
 - **参考实现（SOP）**:
   - [能力]: [仓库内具体文件路径]（[可选：`.cursor/rules/.../sop-*.mdc`]）
-- **CodeStyle 基线**: `ai-docs/global-assets/standards/code-style.md` + `ai-docs/global-assets/standards/architecture-layers.md`；需求内 `code-style.md` 仅记录新增/覆盖规则
+- **CodeStyle 基线**: `ai-docs/global-assets/standards/architecture-layers.md`（分层画像）+ `ai-docs/global-assets/standards/code-style.md`（编码规则 + `## SOPs`）；需求内 `code-style.md` 仅记录新增/覆盖规则
+
+#### Mock 接入
+
+> 仅作为心智模型，不全面罗列接口。实际 API / DTO / 枚举 / 权限 / 常量必须写在各 Group 的 **Local Contract**。
+
+- **Mock 前缀**: `[例：/api/mock 或项目既有 mock base]`
+- **Mock 文件**: `[mock 路径；没有则写“无”]`
+- **Mock 总览**:
+  - `[一句话：Group A 使用列表分页 mock 支撑首屏与筛选]`
+  - `[一句话：Group B 使用详情 mock 支撑编辑回显]`
 
 ---
 
-## 2. Technical Contracts (技术契约)
-<!-- specflow:section=contract -->
-
-> 与 specify 业务规则一致。有 Mock 边界时 **§2.1 为 Implement 默认对接面**；正式接口差异集中在 §2.5 联调替换清单。
-
-### 2.1 Mock / 默认 API（联调前）
-
-> 当 Delivery 含 Mock 时必填。路径、方法、用途一张表说清；Implement Task 1 即对接此表。
-
-| 接口 | 方法 | 用途 |
-|------|------|------|
-| `/api/.../page` | POST | 列表分页 |
-
-**Mock 文件**: `[mock 路径]`（对齐项目既有 mock 接入方式）
-
-### 2.2 业务常量与枚举
-
-**文件**: `[config 路径]` — 单一事实源；枚举成对维护 `*_MAP` + `*_LIST`。
-
-| 常量/枚举 | 值或语义 | 依据 |
-|-----------|----------|------|
-| | | specify / PRD |
-
-### 2.3 数据模型与领域规则
-
-**Domain**: `[domain 路径]`
-
-| 字段/概念 | 类型 | 说明 |
-|-----------|------|------|
-| | | |
-
-**领域衍生（纯函数 / getters，供列表选择与批量操作复用）**:
-
-- `[flagName]`: [判定规则，Plain Language]
-
-### 2.4 正式 API（有依据时填写；Mock 阶段可整节省略或标「联调时启用」）
-
-#### [接口名]
-
-- **POST** `[path]`
-- **Request**: [字段表或 JSON 骨架]
-- **Response**: [字段表或 JSON 骨架]
-- **约束**: [与 specify 一致的门禁]
-
-### 2.5 联调替换清单
-
-> Mock 切真实接口时**只改本节 + api 层**；避免全文搜索替换。
-
-- **Base path**: [正式前缀]
-- **字段映射**: [mock 字段 → 正式字段]
-- **分页/排序**: [差异说明]
-- **权限 URI**: [占位 → 正式 xauth]
-
----
-
-## 3. Feature Breakdown (功能与验证拆解)
-<!-- specflow:section=feature -->
-
-> **只写设计与验证意图**，不写逐步操作（逐步操作只在 §4 Roadmap）。每个 Feature 对应 specify 一个功能切片。  
-> `[TDD]` 只是审计标签；真正执行依据是 §4 Task Group 的 **Test Strategy**。
-
-### [F-01] [功能名称]
-
-- **Ref**: `AC-001` / `AC-002`（可补充关联 `specify.md §3.x`）
-- **Design**:
-  - [组件/组合式职责，1–3 条]
-  - [关键交互或状态，1–3 条]
-- **Verification Intent**:
-  - **TDD candidate**: [可单测的纯逻辑 / 状态机 / 数据转换；没有则写“无”]
-  - **Unit / Component check**: [低成本组件或函数检查；没有则写“无”]
-  - **Mock smoke**: [Mock 环境下可观察的最小流程；没有则写“无”]
-  - **Static evidence**: [实现定位 / 契约一致 / UI 状态检查要点]
-
----
-
-## 4. Implementation Roadmap (执行路径)
+## 2. Implementation Roadmap (执行路径)
 <!-- specflow:section=roadmap -->
 
 > **任务状态机**：`[ ]` Pending · `[?]` Ready for QA · `[!]` Failed · `[x]` Completed  
 > **执行单元**：Task Group。Group 必须是 LLM 可直接执行的自足信息集合；`Ref: F-xx` 只做追踪，不作为实现上下文依赖。  
 > **执行顺序**：默认严格按 Group 顺序。仅当用户选择自动托管且 Group 依赖/文件冲突检查通过时，才允许并行。
-
-### Roadmap Status Overview
-<!-- specflow:roadmap-status-overview -->
-
-| Group | 状态 | 待开发 | 待验收 | 需修复 | 已完成 |
-|-------|------|--------|--------|--------|--------|
-| Group A: [组名 — 如：骨架与 Mock 数据层] | 进行中 | 2 | 0 | 0 | 0 |
-| Group B: [组名] | 待开发 | 0 | 0 | 0 | 0 |
 
 ### 📦 Group A: [组名 — 如：骨架与 Mock 数据层]
 
@@ -153,7 +79,7 @@ Plan 写作原则（架构师视角，单一 plan.md）：
 - **User AC**:
   - `AC-001`: [本组覆盖的用户可观察验收点，Plain Language]
 - **Local Contract**:
-  - [本组需要的 API / DTO / 枚举 / 权限 / 常量；从 §2 摘取最小集合]
+  - [本组所需 API / DTO / 枚举 / 权限 / 常量 / 业务约束，直接写全]
 - **Files**:
   - **Create**: `[路径]`
   - **Modify**: `[路径]`
@@ -174,7 +100,7 @@ Plan 写作原则（架构师视角，单一 plan.md）：
 - [ ] **T-A1** | **Create**: `[文件路径]` | [一句话动作] | Ref: F-01
   - **Step 1**: [具体动作；可含关键代码片段]
   - **Step 2**: […]
-  - **Verify**: `Run: ...` → `Expected: ...`
+  - **Verify**: [目标验证范围] → `Expected: ...`
 
 - [ ] **T-A2 [TDD]** | **Test**: `[spec 路径]` | [先写失败测试再实现的纯逻辑/状态机] | Ref: F-01
   - **Step 1**: 写失败单测（覆盖本组 Test Strategy 的 TDD Units）
@@ -189,11 +115,13 @@ Plan 写作原则（架构师视角，单一 plan.md）：
 - **Goal**: […]
 - **Depends on**: Group A
 - **User AC**:
-  - […]
+  - `AC-002`: […]
 - **Local Contract**:
-  - […]
+  - [本组所需 API / DTO / 枚举 / 权限 / 常量 / 业务约束，直接写全]
 - **Files**:
-  - […]
+  - **Create**: `无`
+  - **Modify**: `[...]`
+  - **Test**: `[...]`
 - **Test Strategy**:
   - **TDD Units**: 无
   - **Unit / Component Checks**: […]
@@ -217,58 +145,4 @@ Plan 写作原则（架构师视角，单一 plan.md）：
 
 ### CodeStyle 增量（归档候选）
 
-- [CodeStyle] [section]: [仅当本需求发现全局未覆盖、且可归属到 architecture-layers 的横切规则时填写] (layers: [architecture-layer-id]) (applies: [来自该 layer 的分层级 glob])
-
-### AC 覆盖自检
-
-| AC | Feature | Group / Task | 覆盖说明 |
-|----|---------|--------------|----------|
-| AC-001 | F-01 | T-A1, T-B2 | [已覆盖 / 延期 / 非目标依据] |
-
----
-
-## 5. Execution Log (执行摘要与存证)
-<!-- specflow:section=execution-log -->
-
-### 🚚 Ready-for-QA Completion Packet
-
-- （Implement 在每个 Group 标记 `[?]` 前必须写入；QA Lite 只审 `focusPlan + Completion Packet`）
-
-```markdown
-#### Completion Packet — Group <ID>
-- **Changed Files**:
-  - `<path>`: <关键改动 / 符号 / 组件>
-- **AC Mapping**:
-  - <User AC 摘要> → `<path>:<line-or-symbol>` → <处理方式>
-- **Local Contract Mapping**:
-  - <接口 / 字段 / 枚举 / 权限 / 常量> → `<path>:<line-or-symbol>` → <一致性结论>
-- **Test Strategy Execution**:
-  - TDD Units: <spec path + Red/Green/Refactor 证据位置 / 无>
-  - Unit/Component Checks: <执行者 Implement/QA + 目标验证范围/结果 / 无>
-  - Mock Smoke: <准备/执行步骤 + 可观察结果 / 环境限制 / 无>
-  - Static Diagnostics: <变更文件诊断/规则核对结果 / 无安全局部能力则说明承接>
-- **Verification Matrix**:
-  - Static Diagnostics: <scope> → <evidence/pass/deferred>
-  - Targeted Test: <scope> → <evidence/pass/deferred>
-  - Contract Check: <scope> → <evidence/pass>
-  - Smoke Evidence: <scope> → <evidence/pass/deferred>
-- **Not Run / Deferred**:
-  - <未执行项> → <原因> → <交给 QA / FinalQA / 人工验收>
-- **Knowledge Rules Used**:
-  - <规则名/来源> → <落点>
-```
-
-### ✅ 验收存证 (Evidence)
-
-- （格式：**[Group ID]**: YYYY-MM-DD | Result: Pass | Mode: QA Lite | Evidence: [Packet/AC/Contract/Test Strategy 核对摘要]）
-
-### ❌ 异常记录 (Blocks)
-
-- （格式：**[Failed] T-xx**: [报错摘要]）
-
----
-
-## 6. Changelog (修改日志)
-<!-- specflow:section=changelog -->
-
-- **YYYY-MM-DD**: [变更摘要]
+- [CodeStyle] [section]: [仅当本需求发现全局未覆盖、且可归属到 architecture-layers.md ## Layers 的横切规则时填写] (layers: [layer-id]) (applies: [来自该 layer 的分层级 glob])

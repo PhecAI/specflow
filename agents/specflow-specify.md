@@ -10,6 +10,15 @@ model: inherit
 
 正式写规格前，必须先识别“高影响不确定点”。SpecFlow 不做苏格拉底式长轮次追问，但也不得把影响业务理解的无依据判断直接写成强规则。澄清是成文前置动作：先问清产品/验收问题，再生成正式 `specify.md`；正式文档只放有依据的产品结论和用户澄清后的答案。
 
+## 设计思想
+
+| 原则 | 做法 |
+| --- | --- |
+| 先澄清后成文 | 高影响不确定点未闭合时只写澄清文件，不写正式规格。 |
+| 产品边界优先 | Specify 只定义产品范围、验收、业务对象与状态，不定义技术契约。 |
+| 低噪音规格 | 只保留会影响范围、验收、权限、合规或高返工取舍的结论。 |
+| 可拆分执行 | Capability 必须用户可感知、可独立验收，并可进入 Plan 拆组。 |
+
 ## 终态
 
 - 没有高影响不确定点：`ai-docs/{需求号}/specify.md` 已完整生成，且没有未闭合 `[?]`；Section 5 是 `Decision Log`，只记录用户澄清后的结论。
@@ -59,6 +68,8 @@ model: inherit
 
 ## knowledgeContext 消费规则
 
+- 若 `knowledgePolicy.baselineStatus` 为 `empty`：当前没有已确认业务领域或需求级业务知识库。不得把依赖存量业务规则、权限、状态流转、历史行为的判断写成直接决策；必须生成澄清或标为候选线索。
+- 若 `knowledgePolicy.baselineStatus` 为 `skipped`：用户已选择跳过业务知识库初始化。只能依据 PRD 明文和用户澄清写规格；不得自行补全线上存量规则。
 - 只采用与本需求领域、用户场景或验收口径直接相关的片段；其余片段视为背景，不写入规格。
 - `Verified` / 全局资产可作为产品事实或边界依据；`Draft` / `Unknown` 只能作为候选线索，不能单独支撑强结论。
 - 与 PRD 或用户输入冲突时，按 Clarification Gate 升级为确认题，不得自行裁决。
@@ -213,11 +224,12 @@ model: inherit
 `specify.md` 必须包含：
 
 1. Requirement Overview / 需求概览。
-2. Product Decisions & Boundaries / 产品决策与边界。
-3. Capabilities / 功能切片。
-4. Business Objects & States / 业务对象与状态。
-5. Decision Log / 决策记录，锚点仍为 `clarification-log`。
-6. Changelog。
+2. Capabilities / 功能切片。
+3. Business Objects & States / 业务对象与状态。
+4. Decision Log / 决策记录，锚点仍为 `clarification-log`。
+5. Changelog。
+
+Requirement Overview 末尾可写 **关键产品决策**，只保留 3-5 条会改变范围、验收、权限或业务边界的高影响结论，一行一句。禁止单独输出 `Product Decisions & Boundaries` 章节；普通产品规则必须沉淀到对应 Capability 的业务规则 / 异常与边界 / 验收要点中，避免与 Capabilities 重复。
 
 完整 `specify.md` 不得保留未闭合 `[?]`。已闭合问题必须沉淀到正文，并在 Decision Log 记录用户澄清的问题、结论与影响范围；未闭合问题只能存在于 `.temp/clarifications.json`。Agent 基于明确依据做出的自主判断直接进入正文，不进入 Decision Log。
 

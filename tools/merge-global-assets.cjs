@@ -16,17 +16,14 @@ const path = require('path')
 const {
   normalizeCodingPatchSection,
   normalizeCodingPatchContent,
-  normalizeCodingPatchStrength,
   normalizeSourceRequirementIds,
-  deriveCodeStyleConfidence,
-  stripStrengthPrefix,
-  normalizeContentForDedup,
   parseGlobalCodeStyleRules,
+  normalizeContentForDedup,
   stripAppliesSuffix,
-  renderRuleLine,
-  renderRulesByScope,
+  stripStrengthPrefix,
+  renderStructuredRulesByLayer,
   filterCodingPatchesForCodeStyle,
-  STRENGTH_HARD,
+  replaceMarkdownSection,
 } = require('./code-style.cjs')
 
 const {
@@ -49,16 +46,13 @@ function parseCodeStyleMap(content) {
     if (!rule) continue
     const key = `${section}::${normalizeContentForDedup(rule)}`
     const row = { section, content: rule, sourceRequirementId: null }
+    if (item.strength) row.strength = item.strength
     const sourceRequirementIds = normalizeSourceRequirementIds(item.sourceRequirementIds)
     if (sourceRequirementIds.length > 0) {
       row.sourceRequirementIds = sourceRequirementIds
-      const ladder = deriveCodeStyleConfidence(sourceRequirementIds)
-      row.status = ladder.status
-      row.confidence = ladder.confidence
     }
     if (Array.isArray(item.applies) && item.applies.length > 0) row.applies = item.applies
-    const strength = normalizeCodingPatchStrength(item.strength)
-    if (strength) row.strength = strength
+    if (Array.isArray(item.layers) && item.layers.length > 0) row.layers = item.layers
     out.set(key, row)
   }
 
@@ -74,11 +68,12 @@ function parseCodeStyleMap(content) {
     const section = normalizeCodingPatchSection(sectionRaw)
     const sourceRequirementId = String(m[3] || '').trim() || null
     const stripped = stripAppliesSuffix(m[2])
-    const strengthSplit = stripStrengthPrefix(stripped.content)
-    const rule = normalizeCodingPatchContent(strengthSplit.content)
+    const strippedStrength = stripStrengthPrefix(stripped.content)
+    const rule = normalizeCodingPatchContent(strippedStrength.content)
     if (!rule) continue
     const key = `${section}::${normalizeContentForDedup(rule)}`
     const row = { section, content: rule, sourceRequirementId }
+    if (strippedStrength.strength) row.strength = strippedStrength.strength
     const sourceRequirementIds = normalizeSourceRequirementIds(
       stripped.sourceRequirementIds && stripped.sourceRequirementIds.length > 0
         ? stripped.sourceRequirementIds
@@ -86,22 +81,16 @@ function parseCodeStyleMap(content) {
     )
     if (sourceRequirementIds.length > 0) {
       row.sourceRequirementIds = sourceRequirementIds
-      const ladder = deriveCodeStyleConfidence(sourceRequirementIds)
-      row.status = ladder.status
-      row.confidence = ladder.confidence
     }
     if (Array.isArray(stripped.applies) && stripped.applies.length > 0) row.applies = stripped.applies
-    if (strengthSplit.strength) row.strength = strengthSplit.strength
-    // 与前一路径合并：取最强 strength + applies 并集
+    if (Array.isArray(stripped.layers) && stripped.layers.length > 0) row.layers = stripped.layers
+    // applies 并集合并
     const prev = out.get(key)
     if (prev) {
-      if (prev.strength === STRENGTH_HARD || row.strength === STRENGTH_HARD) {
-        row.strength = STRENGTH_HARD
-      } else if (!row.strength && prev.strength) {
-        row.strength = prev.strength
-      }
       const appMerged = Array.from(new Set([...(prev.applies || []), ...(row.applies || [])]))
       if (appMerged.length > 0) row.applies = appMerged
+      const layerMerged = Array.from(new Set([...(prev.layers || []), ...(row.layers || [])]))
+      if (layerMerged.length > 0) row.layers = layerMerged
       if (!row.sourceRequirementId && prev.sourceRequirementId) {
         row.sourceRequirementId = prev.sourceRequirementId
       }
@@ -111,9 +100,6 @@ function parseCodeStyleMap(content) {
       ])
       if (sourceMerged.length > 0) {
         row.sourceRequirementIds = sourceMerged
-        const ladder = deriveCodeStyleConfidence(sourceMerged)
-        row.status = ladder.status
-        row.confidence = ladder.confidence
       }
     }
     out.set(key, row)
@@ -121,40 +107,62 @@ function parseCodeStyleMap(content) {
   return out
 }
 
-// 全局 code-style.md 渲染：顶部 Rules by Scope（agent 主视图）+ 底部 Rules by Section（人读目录）
-function renderCodeStyleFromMap(ruleMap) {
+function renderRulesByLayerSection(ruleMap) {
   const rows = Array.from(ruleMap.values()).sort((a, b) => {
     if (a.section === b.section) return a.content.localeCompare(b.content)
     return a.section.localeCompare(b.section)
   })
   const lines = [
-    '# Code Style',
-    '',
-    '> 主视图 **Rules by Scope** 按 `applies` 分组；子代理按当前任务文件路径定位相关规则。',
-    '> 次视图 **Rules by Section** 按分类铺陈，供人读与审计。',
-    '',
-    '## Rules by Scope',
+    '> 规则按 layer 分组；layer 定义见 `architecture-layers.md` 的 `## Layers` 章节。',
+    '> `(applies: ...)` 声明规则的生效文件范围；子代理按当前任务路径定位相关规则。',
     '',
   ]
-  lines.push(renderRulesByScope(rows, { includeSources: true, includeSource: false }))
-  lines.push('## Rules by Section', '')
-  // 按 section 分组输出
-  const bySection = new Map()
-  for (const row of rows) {
-    const s = row.section
-    if (!bySection.has(s)) bySection.set(s, [])
-    bySection.get(s).push(row)
-  }
-  const sections = Array.from(bySection.keys()).sort()
-  for (const s of sections) {
-    lines.push(`### \`${s}\``)
-    for (const row of bySection.get(s)) {
-      lines.push(renderRuleLine(row, { includeSources: true, includeSource: false }))
-    }
-    lines.push('')
-  }
-  if (sections.length === 0) lines.push('- (none)', '')
+  lines.push(renderStructuredRulesByLayer(rows))
   return lines.join('\n')
+}
+
+function renderCodeStyleFromMap(prevStyle, ruleMap) {
+  const base = String(prevStyle || '').trim()
+    ? String(prevStyle || '')
+    : [
+      '# Code Style',
+      '',
+      '> 编码规范与跨层 SOP 的全局事实源。',
+      '> layer id 必须来自 `architecture-layers.md` 的 `## Layers` 章节。',
+      '',
+      '## Rules by Layer',
+      '',
+      '<!-- specflow:section Rules by Layer -->',
+      '<!--',
+      'Rule entry schema:',
+      '### `layer-id`',
+      '- should:',
+      '  - section: rule content (applies: globs)',
+      '-->',
+      '',
+      '_（暂无全局规则，由需求归档逐步填充）_',
+      '',
+      '## SOPs',
+      '',
+      '<!-- specflow:section SOPs -->',
+      '<!--',
+      'SOP entry schema:',
+      '### `sop-id`',
+      '- applies:',
+      '  - scenario or glob',
+      '- layers:',
+      '  - `layer-id`',
+      '- pattern:',
+      '  1. step',
+      '- validation: lint/typecheck/AST/rg/CI/PR checklist',
+      '- reference:',
+      '  - `representative/file`',
+      '-->',
+      '',
+      '_（暂无全局 SOP，由需求归档逐步填充）_',
+      '',
+    ].join('\n')
+  return replaceMarkdownSection(base, 'Rules by Layer', renderRulesByLayerSection(ruleMap))
 }
 
 function safeReadJson(filePath, fallback) {
@@ -269,11 +277,9 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
       const section = normalizeCodingPatchSection(patch.section)
       const rawContent = normalizeCodingPatchContent(patch.content)
       if (!rawContent) continue
-      // 兼容 content 前缀 / 独立 strength 字段
-      const stripped = stripStrengthPrefix(rawContent)
-      const content = stripped.content
-      const strength =
-        stripped.strength || normalizeCodingPatchStrength(patch.strength) || undefined
+      // 向后兼容：剥离历史 [Hard]/[Soft] 前缀
+      const strippedStrength = stripStrengthPrefix(rawContent)
+      const content = strippedStrength.content
       const key = `${section}::${normalizeContentForDedup(content)}`
       const row = {
         section,
@@ -281,7 +287,11 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
         sourceRequirementId:
           String(patch.sourceRequirementId || '').trim() || String(requirementId || '').trim() || null,
       }
+      if (patch.strength || strippedStrength.strength) {
+        row.strength = patch.strength || strippedStrength.strength
+      }
       const incomingApplies = Array.isArray(patch.applies) ? patch.applies.filter(Boolean) : null
+      const incomingLayers = Array.isArray(patch.layers) ? patch.layers.filter(Boolean) : null
       const prev = styleMap.get(key)
       const sourceRequirementIds = normalizeSourceRequirementIds([
         ...((prev && prev.sourceRequirementIds) || []),
@@ -290,23 +300,20 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
       ])
       if (sourceRequirementIds.length > 0) {
         row.sourceRequirementIds = sourceRequirementIds
-        const ladder = deriveCodeStyleConfidence(sourceRequirementIds)
-        row.status = ladder.status
-        row.confidence = ladder.confidence
       }
       const merged = new Set([
         ...((prev && Array.isArray(prev.applies)) ? prev.applies : []),
         ...((incomingApplies || [])),
       ])
       if (merged.size > 0) row.applies = Array.from(merged)
-      // strength 合并：任一 hard 则 hard
-      if (prev && prev.strength === STRENGTH_HARD) row.strength = STRENGTH_HARD
-      else if (strength === STRENGTH_HARD) row.strength = STRENGTH_HARD
-      else if (prev && prev.strength) row.strength = prev.strength
-      else if (strength) row.strength = strength
+      const mergedLayers = new Set([
+        ...((prev && Array.isArray(prev.layers)) ? prev.layers : []),
+        ...((incomingLayers || [])),
+      ])
+      if (mergedLayers.size > 0) row.layers = Array.from(mergedLayers)
       styleMap.set(key, row)
     }
-    fs.writeFileSync(codeStylePath, renderCodeStyleFromMap(styleMap), UTF8)
+    fs.writeFileSync(codeStylePath, renderCodeStyleFromMap(prevStyle, styleMap), UTF8)
   }
 
   // 合并完成后不保留补丁历史目录，避免持续膨胀

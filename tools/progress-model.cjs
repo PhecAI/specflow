@@ -41,8 +41,9 @@ function mapPhaseToChinese(phase) {
 function mapAgentToUserTitle(agent, mode) {
   const a = String(agent || '')
   const m = String(mode || '')
+  if (a === 'specflow-specify-preview') return '先做一次产品预审'
   if (a === 'specflow-specify') return '整理并更新需求规格'
-  if (a === 'specflow-specify-review') return '先做一次规格评审'
+  if (a === 'specflow-plan-preview' || a === 'specflow-specify-review') return '先做一次技术方案预审'
   if (a === 'specflow-plan') return '编写技术方案与任务拆分'
   if (a === 'specflow-implement') return '开始开发当前任务'
   if (a === 'specflow-qa') return '进行验收检查'
@@ -77,6 +78,7 @@ function inferQuestionProgressKey(questionId) {
   if (qid === 'domain_init_candidates_text') return 'interaction.domain_init_candidates'
   if (qid.startsWith('domain_init_accept__')) return 'interaction.domain_init_accept'
   if (qid === 'confirm_start_plan') return 'interaction.plan_confirm'
+  if (qid === 'confirm_start_implement') return 'interaction.implement_confirm'
   if (qid === 'confirm_start_group') return 'interaction.group_confirm'
   if (qid === 'retry_limit_exceeded') return 'interaction.retry_limit_exceeded'
   return 'interaction.default'

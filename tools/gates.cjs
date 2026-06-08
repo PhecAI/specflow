@@ -12,6 +12,7 @@ const path = require('path')
 const UTF8 = 'utf-8'
 const GATES_FILE = '.temp/gates.json'
 const GATES_VERSION = 1
+const GATE_HISTORY_LIMIT = 20
 
 const VALID_STATUS = new Set(['pending', 'passed', 'blocked', 'invalidated', 'skipped'])
 const VALID_STAGE = new Set(['Init', 'Specify', 'PlanReadiness', 'Plan', 'Implement', 'QA', 'Archive'])
@@ -39,6 +40,12 @@ const GATE_DEFINITIONS = {
     kind: 'artifact',
     required: true,
   },
+  'init.code_style': {
+    stage: 'Init',
+    scope: 'global',
+    kind: 'artifact',
+    required: true,
+  },
   'init.domain_refs': {
     stage: 'Init',
     scope: 'requirement',
@@ -49,6 +56,12 @@ const GATE_DEFINITIONS = {
     stage: 'Specify',
     scope: 'requirement',
     kind: 'computed',
+    required: true,
+  },
+  'specify.product_preview': {
+    stage: 'Specify',
+    scope: 'requirement',
+    kind: 'ack',
     required: true,
   },
   'specify.document_ready': {
@@ -76,6 +89,20 @@ const GATE_DEFINITIONS = {
     stage: 'Plan',
     scope: 'plan',
     kind: 'artifact',
+    required: true,
+    snapshotRequired: true,
+  },
+  'plan.implement_approved': {
+    stage: 'Plan',
+    scope: 'plan',
+    kind: 'ack',
+    required: true,
+    snapshotRequired: true,
+  },
+  'implement.user_confirm_start': {
+    stage: 'Implement',
+    scope: 'plan',
+    kind: 'ack',
     required: true,
     snapshotRequired: true,
   },
@@ -175,7 +202,7 @@ function sanitizeGate(raw, idHint) {
   if (Array.isArray(gate.history)) {
     out.history = gate.history
       .filter((x) => x && typeof x === 'object')
-      .slice(-40)
+      .slice(-GATE_HISTORY_LIMIT)
       .map((x) => ({
         status: sanitizeStatus(x.status),
         at: typeof x.at === 'string' ? x.at.slice(0, 40) : new Date(0).toISOString(),
@@ -249,6 +276,22 @@ function snapshotsEqual(a, b) {
   return JSON.stringify(aa) === JSON.stringify(bb)
 }
 
+function evidenceEqual(a, b) {
+  const aa = normalizeEvidence(a)
+  const bb = normalizeEvidence(b)
+  return JSON.stringify(aa) === JSON.stringify(bb)
+}
+
+function gatePatchChangesState(prev, patch) {
+  const nextStatus = sanitizeStatus(patch.status || prev.status || 'pending')
+  if (sanitizeStatus(prev.status) !== nextStatus) return true
+  if (String(prev.reason || '') !== String(patch.reason || '')) return true
+  if (!snapshotsEqual(prev.snapshot || {}, patch.snapshot || {})) return true
+  if (!evidenceEqual(prev.evidence || [], patch.evidence || [])) return true
+  if (String(prev.subject || '') !== String(patch.subject || '')) return true
+  return false
+}
+
 function readGates(requirementDir) {
   const file = getGatesPath(requirementDir)
   const raw = safeReadJson(file, {})
@@ -288,19 +331,24 @@ function updateGate(requirementDir, gateId, patch) {
   const registry = readGates(requirementDir)
   const prev = registry.gates[id] || { id, status: 'pending' }
   const now = new Date().toISOString()
+  const shouldAppendHistory = gatePatchChangesState(prev, patch)
+  const prevHistory = Array.isArray(prev.history) ? prev.history : []
+  const history = shouldAppendHistory
+    ? [
+        ...prevHistory,
+        {
+          status: patch.status || prev.status || 'pending',
+          at: now,
+          reason: patch.reason || '',
+        },
+      ].slice(-GATE_HISTORY_LIMIT)
+    : prevHistory.slice(-GATE_HISTORY_LIMIT)
   const next = sanitizeGate({
     ...prev,
     ...patch,
     id,
-    updatedAt: now,
-    history: [
-      ...(Array.isArray(prev.history) ? prev.history : []),
-      {
-        status: patch.status || prev.status || 'pending',
-        at: now,
-        reason: patch.reason || '',
-      },
-    ],
+    updatedAt: shouldAppendHistory ? now : prev.updatedAt,
+    history,
   }, id)
   const validation = validateGate(next)
   if (!validation.ok) return validation

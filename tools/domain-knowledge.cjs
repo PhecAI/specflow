@@ -41,7 +41,6 @@ const SECTION_HEADINGS = {
   formula: '## 核心公式',
   pitfall: '## 避坑 / 风险',
   techDebt: '## 技术债 & TODO',
-  evidence: '## 证据附录',
   legacy: '## Legacy (pre-migration)',
 }
 
@@ -395,7 +394,6 @@ function parseDomainMd(md) {
   const sections = splitBodyIntoSections(body)
   const buckets = { summary: [], entity: [], rule: [], stateMachine: [], formula: [], pitfall: [], techDebt: [] }
   const legacyLines = []
-  const evidenceLines = []
   let preambleH1 = null
   for (const sec of sections) {
     if (sec.heading === '__preamble__') {
@@ -420,11 +418,6 @@ function parseDomainMd(md) {
     }
     for (const key of Object.keys(SECTION_HEADINGS)) {
       if (key === 'legacy') continue
-      if (key === 'evidence' && heading.startsWith(SECTION_HEADINGS[key])) {
-        evidenceLines.push(...sec.lines)
-        matched = true
-        break
-      }
       if (heading.startsWith(SECTION_HEADINGS[key])) {
         const { dataRows } = parseSectionRows(key, sec.lines)
         if (buckets[key]) buckets[key].push(...dataRows)
@@ -437,23 +430,10 @@ function parseDomainMd(md) {
       legacyLines.push(heading, ...sec.lines)
     }
   }
-  return { frontmatter: frontmatter || null, preambleH1, buckets, legacyLines, evidenceLines }
+  return { frontmatter: frontmatter || null, preambleH1, buckets, legacyLines }
 }
 
-function renderEvidenceAppendix(lines) {
-  const trimmed = (lines || []).map((l) => String(l || '')).filter((l) => l.trim() !== '')
-  const out = [SECTION_HEADINGS.evidence, '']
-  out.push('> 主知识库只保留默认注入的裁判规则；字段细节、代码路径、边界案例和被折叠信息下沉到这里，按需追溯。', '')
-  if (trimmed.length === 0) {
-    out.push('_(暂无)_', '')
-  } else {
-    for (const l of trimmed) out.push(l)
-    out.push('')
-  }
-  return out.join('\n')
-}
-
-function renderDomainMd({ frontmatter, preambleH1, buckets, legacyLines, evidenceLines }) {
+function renderDomainMd({ frontmatter, preambleH1, buckets, legacyLines }) {
   const parts = []
   if (frontmatter) {
     parts.push(renderFrontmatter(frontmatter))
@@ -469,7 +449,6 @@ function renderDomainMd({ frontmatter, preambleH1, buckets, legacyLines, evidenc
   for (const key of ['entity', 'rule', 'stateMachine', 'formula', 'pitfall', 'techDebt']) {
     parts.push(renderSectionTable(key, nextBuckets[key] || []))
   }
-  parts.push(renderEvidenceAppendix(evidenceLines))
   const trimmedLegacy = (legacyLines || []).map((l) => String(l || '')).filter((l) => l.trim() !== '')
   if (trimmedLegacy.length > 0) {
     parts.push(SECTION_HEADINGS.legacy, '')
@@ -529,7 +508,6 @@ function mergePatchesIntoDomainMd(existingMd, domainName, patches, options = {})
     preambleH1: parsed.preambleH1 || `# ${domainName}`,
     buckets: parsed.buckets,
     legacyLines: parsed.legacyLines,
-    evidenceLines: parsed.evidenceLines,
   })
   return {
     md: nextMd,

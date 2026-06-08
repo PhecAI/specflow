@@ -1,5 +1,6 @@
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 
 const UTF8 = 'utf-8'
 
@@ -13,9 +14,6 @@ function normalizeCodingPatchContent(raw) {
 
 const PATCH_KIND_ADDITION = 'addition'
 const PATCH_KIND_OVERRIDE = 'override'
-
-const STRENGTH_HARD = 'hard'
-const STRENGTH_SOFT = 'soft'
 
 function normalizeSourceRequirementIds(raw) {
   const arr = Array.isArray(raw)
@@ -34,12 +32,6 @@ function normalizeSourceRequirementIds(raw) {
   return out
 }
 
-function deriveCodeStyleConfidence(sourceRequirementIds) {
-  const n = normalizeSourceRequirementIds(sourceRequirementIds).length
-  if (n >= 3) return { status: 'Verified', confidence: 0.85, count: n }
-  if (n >= 2) return { status: 'Consolidating', confidence: 0.6, count: n }
-  return { status: 'Draft', confidence: 0.3, count: n }
-}
 
 function normalizeCodingPatchKind(raw) {
   const v = String(raw || '').trim().toLowerCase()
@@ -51,23 +43,30 @@ function normalizeCodingPatchBasedOn(raw) {
   return v || undefined
 }
 
-function normalizeCodingPatchStrength(raw) {
-  const v = String(raw || '').trim().toLowerCase()
-  if (v === STRENGTH_HARD || v === 'strong' || v === '强') return STRENGTH_HARD
-  if (v === STRENGTH_SOFT || v === 'weak' || v === '弱' || v === '软') return STRENGTH_SOFT
-  return undefined
-}
-
-// 从 content 前缀剥离 [Hard]/[Soft] 标记为 strength 字段；返回 { content, strength }
-// 原因：历史数据把 [Hard] 混在 content 字面里，导致 dedup 与渲染失真。
+// 向后兼容：从 content 前缀剥离历史 [Hard]/[Soft] 标记（旧文档格式），仅供 dedup 使用。
 function stripStrengthPrefix(raw) {
   const text = String(raw || '')
   const m = text.match(/^\s*\[(hard|soft)\]\s*/i)
-  if (!m) return { content: text.trim(), strength: undefined }
-  return {
-    content: text.slice(m[0].length).trim(),
-    strength: m[1].toLowerCase() === 'hard' ? STRENGTH_HARD : STRENGTH_SOFT,
-  }
+  const content = m ? text.slice(m[0].length).trim() : text.trim()
+  return { content, strength: m ? m[1].toLowerCase() : undefined }
+}
+
+function contentWithoutStrength(raw) {
+  return stripStrengthPrefix(raw).content
+}
+
+function normalizeCodingPatchStrength(raw) {
+  const v = String(raw || '').trim().toLowerCase()
+  if (v === 'hard' || v === 'soft') return v
+  return undefined
+}
+
+function mergeStrength(a, b) {
+  const av = normalizeCodingPatchStrength(a)
+  const bv = normalizeCodingPatchStrength(b)
+  if (av === 'hard' || bv === 'hard') return 'hard'
+  if (av === 'soft' || bv === 'soft') return 'soft'
+  return undefined
 }
 
 // 规则 content 归一化键（仅用于 dedup/matching 比较，不落盘）
@@ -81,6 +80,43 @@ function normalizeContentForDedup(raw) {
   s = s.replace(/^[。；;,.\s:：]+/u, '')
   s = s.replace(/\s+/g, ' ').trim()
   return s
+}
+
+function extractMarkdownSection(content, heading) {
+  const text = String(content || '')
+  const escaped = String(heading || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`^##\\s+${escaped}\\s*$`, 'mi')
+  const match = text.match(re)
+  if (!match || typeof match.index !== 'number') return ''
+  const start = match.index + match[0].length
+  const rest = text.slice(start)
+  const next = rest.search(/^##\s+/m)
+  return (next >= 0 ? rest.slice(0, next) : rest).trim()
+}
+
+function replaceMarkdownSection(content, heading, body) {
+  const text = String(content || '')
+  const escaped = String(heading || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`^##\\s+${escaped}\\s*$`, 'mi')
+  const match = text.match(re)
+  const normalizedBody = String(body || '').replace(/^\s+|\s+$/g, '')
+  const section = `## ${heading}\n\n${normalizedBody}\n`
+  if (!match || typeof match.index !== 'number') {
+    const prefix = text.trim() ? text.replace(/\s+$/, '') : '# Code Style & Architecture'
+    return `${prefix}\n\n${section}`
+  }
+  const start = match.index
+  const afterHeading = match.index + match[0].length
+  const rest = text.slice(afterHeading)
+  const next = rest.search(/^##\s+/m)
+  const end = next >= 0 ? afterHeading + next : text.length
+  const before = text.slice(0, start).replace(/\s+$/, '')
+  const after = text.slice(end).replace(/^\s+/, '')
+  return `${before}\n\n${section}${after ? `\n${after}` : ''}`
+}
+
+function stripMarkdownHtmlComments(raw) {
+  return String(raw || '').replace(/<!--[\s\S]*?-->/g, '')
 }
 
 function normalizeCodingPatchApplies(raw) {
@@ -129,30 +165,156 @@ function readArchitectureLayers(workspaceRoot) {
     'architecture-layers.md',
   )
   const content = fs.existsSync(layersPath) ? fs.readFileSync(layersPath, UTF8) : ''
-  return { layersPath, layers: parseArchitectureLayers(content), content }
+  const layerObjects = parseCodeStyleLayers(content)
+  const layers = layerObjects.map((l) => l.id)
+  return { layersPath, layers, layerObjects, content }
 }
 
-function parseArchitectureLayers(content) {
+function parseArchitectureLayers(layersContent) {
+  return parseCodeStyleLayers(String(layersContent || '')).map((l) => l.id)
+}
+
+function parseCodeStyleLayers(content) {
   const ids = []
+  const objects = []
   const seen = new Set()
-  const raw = String(content || '')
+  const section = extractMarkdownSection(content, 'Layers')
+  const raw = stripMarkdownHtmlComments(section || String(content || ''))
   const re = /^###\s+`?([^`\n]+?)`?\s*$/gm
   let m
   while ((m = re.exec(raw)) !== null) {
     const id = String(m[1] || '').trim()
-    if (!id || id === '<layer-id>') continue
+    if (!id || id === '<layer-id>' || id === 'layer-id') continue
     if (/^Layer Template$/i.test(id)) continue
     if (id.includes('<') || id.includes('>')) continue
-    if (!seen.has(id)) {
-      seen.add(id)
-      ids.push(id)
+    if (seen.has(id)) continue
+    seen.add(id)
+    ids.push({ id, index: m.index, end: re.lastIndex })
+  }
+  for (let i = 0; i < ids.length; i++) {
+    const cur = ids[i]
+    const next = ids[i + 1]
+    const body = raw.slice(cur.end, next ? next.index : raw.length)
+    objects.push(parseLayerBody(cur.id, body))
+  }
+  return objects
+}
+
+function parseLayerBody(id, body) {
+  return {
+    id,
+    globs: parseBulletSublist(body, 'globs'),
+    role: parseBulletScalar(body, 'role'),
+    should: parseBulletSublist(body, 'should'),
+    should_not: parseBulletSublist(body, 'should_not'),
+    evidence: parseBulletSublist(body, 'evidence'),
+  }
+}
+
+function parseBulletScalar(body, key) {
+  const re = new RegExp(`^-\\s+${key}:\\s*(.*)$`, 'mi')
+  const m = String(body || '').match(re)
+  return m ? stripBackticks(m[1]).trim() : ''
+}
+
+function parseBulletSublist(body, key) {
+  const lines = String(body || '').split('\n')
+  const out = []
+  let inBlock = false
+  for (const line of lines) {
+    const keyMatch = line.match(new RegExp(`^-\\s+${key}:\\s*(.*)$`, 'i'))
+    if (keyMatch) {
+      inBlock = true
+      const inline = stripBackticks(keyMatch[1]).trim()
+      if (inline) out.push(inline)
+      continue
+    }
+    if (inBlock) {
+      const child = line.match(/^\s+-\s+(.+?)\s*$/)
+      if (child) {
+        out.push(stripBackticks(child[1]).trim())
+        continue
+      }
+      if (/^-\s+\S/.test(line) || /^###\s+/.test(line)) inBlock = false
     }
   }
-  return ids
+  return out.filter(Boolean)
+}
+
+function stripBackticks(raw) {
+  return String(raw || '').replace(/^`|`$/g, '')
 }
 
 function isArchitectureLayersCalibrated(workspaceRoot) {
   return readArchitectureLayers(workspaceRoot).layers.length > 0
+}
+
+function isGlobalCodeStylePopulated(workspaceRoot) {
+  const { globalRules } = readGlobalCodeStyleRules(workspaceRoot)
+  if (globalRules.length > 0) return true
+  const globalPath = path.join(
+    workspaceRoot,
+    'ai-docs',
+    'global-assets',
+    'standards',
+    'code-style.md',
+  )
+  if (!fs.existsSync(globalPath)) return false
+  const content = fs.readFileSync(globalPath, UTF8)
+  const sops = parseCodeStyleSops(content)
+  return sops.length > 0
+}
+
+function parseCodeStyleSops(content) {
+  const section = stripMarkdownHtmlComments(extractMarkdownSection(content, 'SOPs'))
+  if (!section) return []
+  const out = []
+  const heads = []
+  const re = /^###\s+`?([^`\n]+?)`?\s*$/gm
+  let m
+  while ((m = re.exec(section)) !== null) {
+    const id = String(m[1] || '').trim()
+    if (!id || id === 'sop-id' || id.includes('<') || id.includes('>')) continue
+    heads.push({ id, index: m.index, end: re.lastIndex })
+  }
+  for (let i = 0; i < heads.length; i++) {
+    const cur = heads[i]
+    const next = heads[i + 1]
+    const body = section.slice(cur.end, next ? next.index : section.length)
+    out.push({
+      id: cur.id,
+      applies: parseBulletSublist(body, 'applies'),
+      layers: parseBulletSublist(body, 'layers').map(stripBackticks),
+      pattern: parseNumberedOrBulletSublist(body, 'pattern'),
+      validation: parseBulletScalar(body, 'validation'),
+      reference: parseBulletSublist(body, 'reference'),
+    })
+  }
+  return out
+}
+
+function parseNumberedOrBulletSublist(body, key) {
+  const lines = String(body || '').split('\n')
+  const out = []
+  let inBlock = false
+  for (const line of lines) {
+    const keyMatch = line.match(new RegExp(`^-\\s+${key}:\\s*(.*)$`, 'i'))
+    if (keyMatch) {
+      inBlock = true
+      const inline = stripBackticks(keyMatch[1]).trim()
+      if (inline) out.push(inline)
+      continue
+    }
+    if (inBlock) {
+      const child = line.match(/^\s+(?:-\s+|\d+\.\s+)(.+?)\s*$/)
+      if (child) {
+        out.push(stripBackticks(child[1]).trim())
+        continue
+      }
+      if (/^-\s+\S/.test(line) || /^###\s+/.test(line)) inBlock = false
+    }
+  }
+  return out.filter(Boolean)
 }
 
 // 从规则原文尾部循环抽取 `(layers: a, b)`、`(applies: a, b)` 与来源/置信度元数据；
@@ -252,9 +414,9 @@ function extractCodingStandardPatchesFromPlan(planContent) {
       content = normalizeCodingPatchContent(raw)
     }
     if (!content) continue
-    // 从 content 前缀剥离 [Hard]/[Soft]，字段化
-    const stripped = stripStrengthPrefix(content)
-    const finalContent = stripped.content
+    // 向后兼容：剥离历史 [Hard]/[Soft] 前缀
+    const strippedStrength = stripStrengthPrefix(content)
+    const finalContent = strippedStrength.content
     if (!finalContent) continue
     const item = {
       section,
@@ -262,7 +424,8 @@ function extractCodingStandardPatchesFromPlan(planContent) {
       kind,
       extractedAt: new Date().toISOString(),
     }
-    if (stripped.strength) item.strength = stripped.strength
+    const strength = mergeStrength(strippedStrength.strength)
+    if (strength) item.strength = strength
     if (basedOn) item.basedOn = basedOn
     if (layers) item.layers = layers
     if (applies) item.applies = applies
@@ -285,15 +448,12 @@ function mergeCodingPatches(existing, incoming, options = {}) {
     const layers = normalizeCodingPatchLayers(item && item.layers)
     const applies = normalizeCodingPatchApplies(item && item.applies)
 
-    // 兼容：content 可能携带 [Hard]/[Soft] 前缀，或 item 已有 strength 字段
+    // 向后兼容：剥离历史 [Hard]/[Soft] 前缀
     const stripped = stripStrengthPrefix(rawContent)
     const content = stripped.content
-    const strength =
-      stripped.strength ||
-      normalizeCodingPatchStrength(item && item.strength) ||
-      undefined
+    const strength = mergeStrength(item && item.strength, stripped.strength)
 
-    // dedup key 用归一化文本，避免 `[Hard] X` 与 `X。` 判成两条
+    // dedup key 用归一化文本
     const dedupKey = `${kind}::${section}::${normalizeContentForDedup(content)}`
 
     const normalized = {
@@ -306,24 +466,14 @@ function mergeCodingPatches(existing, incoming, options = {}) {
         sourceRequirementId ||
         undefined,
     }
-    if (strength) normalized.strength = strength
     if (basedOn) normalized.basedOn = basedOn
     if (layers) normalized.layers = layers
     if (applies) normalized.applies = applies
+    if (strength) normalized.strength = strength
 
     const prev = seen.get(dedupKey)
     if (prev) {
-      // 合并策略：
-      // - strength 取强者（任一 hard 则 hard）
-      // - applies 取并集
-      // - sourceRequirementId 取最新非空
-      // - basedOn 沿用最新非空
-      // - extractedAt 取最新
-      if (prev.strength === STRENGTH_HARD || normalized.strength === STRENGTH_HARD) {
-        normalized.strength = STRENGTH_HARD
-      } else if (!normalized.strength && prev.strength) {
-        normalized.strength = prev.strength
-      }
+      // 合并策略：applies 取并集，sourceRequirementId 取最新非空
       const mergedApplies = Array.from(
         new Set([...(prev.applies || []), ...(normalized.applies || [])]),
       )
@@ -336,6 +486,8 @@ function mergeCodingPatches(existing, incoming, options = {}) {
         normalized.sourceRequirementId = prev.sourceRequirementId
       }
       if (!normalized.basedOn && prev.basedOn) normalized.basedOn = prev.basedOn
+      const mergedStrength = mergeStrength(prev.strength, normalized.strength)
+      if (mergedStrength) normalized.strength = mergedStrength
     }
     seen.set(dedupKey, normalized)
   }
@@ -360,11 +512,41 @@ function looksImplementationSpecific(text) {
   const value = String(text || '')
   if (!value.trim()) return true
   if (/(本需求|当前需求|此次需求|本次需求|需求\s*\d+)/.test(value)) return true
+  // Business/domain-specific class or component names such as ShortDramaMaterial
+  // indicate a rule is still tied to one implementation instead of an architecture layer.
+  const backticked = value.match(/`([^`]+)`/g) || []
+  for (const raw of backticked) {
+    const token = raw.slice(1, -1).trim()
+    if (looksBusinessNamedIdentifier(token)) return true
+  }
+  if (looksBusinessNamedIdentifier(value)) return true
   return false
 }
 
+function looksBusinessNamedIdentifier(text) {
+  const value = String(text || '')
+  const allowed = new Set([
+    'Vue',
+    'Pinia',
+    'DTO',
+    'DOM',
+    'API',
+    'REST',
+    'GraphQL',
+    'RPC',
+    'SCSS',
+    'BEM',
+    'Element',
+    'ElementPlus',
+  ])
+  const matches = value.match(/\b[A-Z][A-Za-z0-9]*(?:[A-Z][a-z0-9]+){2,}\b/g) || []
+  return matches.some((name) => !allowed.has(name))
+}
+
 function filterCodingPatchesForCodeStyle(workspaceRoot, patches) {
-  const knownLayers = new Set(readArchitectureLayers(workspaceRoot).layers)
+  const layerInfo = readArchitectureLayers(workspaceRoot)
+  const layerMap = new Map((layerInfo.layerObjects || []).map((layer) => [layer.id, layer]))
+  const knownLayers = new Set(layerInfo.layers)
   const accepted = []
   const rejected = []
   for (const patch of Array.isArray(patches) ? patches : []) {
@@ -374,6 +556,9 @@ function filterCodingPatchesForCodeStyle(workspaceRoot, patches) {
     const section = normalizeCodingPatchSection(patch && patch.section)
     const reasons = []
 
+    if (knownLayers.size === 0) {
+      reasons.push('code-style Layers section is empty')
+    }
     if (!layers || layers.length === 0) {
       reasons.push('missing layers')
     } else if (knownLayers.size > 0) {
@@ -386,19 +571,60 @@ function filterCodingPatchesForCodeStyle(workspaceRoot, patches) {
     if (applies && applies.some(isBusinessScopedGlob)) {
       reasons.push('applies is scoped to a business module instead of an architecture layer')
     }
+    let finalApplies = applies
+    if (reasons.length === 0 && layers && knownLayers.size > 0) {
+      const inheritedGlobs = Array.from(new Set(
+        layers.flatMap((layer) => {
+          const obj = layerMap.get(layer)
+          return obj && Array.isArray(obj.globs) ? obj.globs : []
+        }).filter(Boolean),
+      ))
+      if (!finalApplies || finalApplies.length === 0) {
+        finalApplies = inheritedGlobs.length > 0 ? inheritedGlobs : undefined
+      } else if (inheritedGlobs.length > 0) {
+        const invalid = finalApplies.filter((g) => !globCoveredByAny(g, inheritedGlobs))
+        if (invalid.length > 0) {
+          reasons.push(`applies outside layer globs: ${invalid.join(', ')}`)
+        }
+      }
+    }
 
     if (reasons.length > 0) {
       rejected.push({ patch, reasons })
     } else {
-      accepted.push({ ...patch, layers, applies })
+      accepted.push({ ...patch, layers, applies: finalApplies })
     }
   }
   return { accepted, rejected, knownLayers: Array.from(knownLayers), architectureLayersEmpty: knownLayers.size === 0 }
 }
 
+function globCoveredByAny(glob, layerGlobs) {
+  const target = normalizeGlobForCoverage(glob)
+  return layerGlobs.some((candidate) => {
+    const base = normalizeGlobForCoverage(candidate)
+    if (target === base) return true
+    const prefix = globCoveragePrefix(base)
+    return prefix && target.startsWith(prefix)
+  })
+}
+
+function normalizeGlobForCoverage(glob) {
+  return String(glob || '').trim().replace(/\\/g, '/').replace(/^`|`$/g, '')
+}
+
+function globCoveragePrefix(glob) {
+  const s = normalizeGlobForCoverage(glob)
+  const idx = s.search(/[*?{]/)
+  if (idx < 0) return s.endsWith('/') ? s : path.dirname(s).replace(/\\/g, '/') + '/'
+  const prefix = s.slice(0, idx)
+  const slash = prefix.lastIndexOf('/')
+  return slash >= 0 ? prefix.slice(0, slash + 1) : ''
+}
+
 function parseGlobalCodeStyleRules(content) {
   const rules = []
   if (!content) return rules
+  rules.push(...parseStructuredCodeStyleRules(content))
   const lines = String(content)
     .split('\n')
     .map((l) => l.trim())
@@ -413,12 +639,13 @@ function parseGlobalCodeStyleRules(content) {
       // 排除掉前缀是 Hard/Soft/CodeStyle 等关键字（会被下面独立分支处理）
       if (!/^(hard|soft|codestyle|codingstyle|代码规范)$/i.test(sectionRaw.trim())) {
         const stripped = stripAppliesSuffix(m[2])
-        const strengthSplit = stripStrengthPrefix(stripped.content)
-        const rule = {
-          section: normalizeCodingPatchSection(sectionRaw),
-          content: normalizeCodingPatchContent(strengthSplit.content),
-        }
-        if (strengthSplit.strength) rule.strength = strengthSplit.strength
+      const strippedStrength = stripStrengthPrefix(stripped.content)
+      const content = strippedStrength.content
+      const rule = {
+        section: normalizeCodingPatchSection(sectionRaw),
+        content: normalizeCodingPatchContent(content),
+      }
+      if (strippedStrength.strength) rule.strength = strippedStrength.strength
         if (stripped.layers) rule.layers = stripped.layers
         if (stripped.applies) rule.applies = stripped.applies
         const sourceIds = stripped.sourceRequirementIds && stripped.sourceRequirementIds.length > 0
@@ -426,9 +653,6 @@ function parseGlobalCodeStyleRules(content) {
           : normalizeSourceRequirementIds(stripped.sourceRequirementId)
         if (sourceIds.length > 0) {
           rule.sourceRequirementIds = sourceIds
-          const ladder = deriveCodeStyleConfidence(sourceIds)
-          rule.status = ladder.status
-          rule.confidence = ladder.confidence
         }
         rules.push(rule)
         continue
@@ -438,12 +662,13 @@ function parseGlobalCodeStyleRules(content) {
     m = line.match(/^-\s*\[(?:CodeStyle|CodingStyle|代码规范)\]\s*([^:\]]*?)\s*:\s*(.+)$/i)
     if (m) {
       const stripped = stripAppliesSuffix(m[2])
-      const strengthSplit = stripStrengthPrefix(stripped.content)
+      const strippedStrength = stripStrengthPrefix(stripped.content)
+      const content = strippedStrength.content
       const rule = {
         section: normalizeCodingPatchSection(m[1]),
-        content: normalizeCodingPatchContent(strengthSplit.content),
+        content: normalizeCodingPatchContent(content),
       }
-      if (strengthSplit.strength) rule.strength = strengthSplit.strength
+      if (strippedStrength.strength) rule.strength = strippedStrength.strength
       if (stripped.layers) rule.layers = stripped.layers
       if (stripped.applies) rule.applies = stripped.applies
       const sourceIds = stripped.sourceRequirementIds && stripped.sourceRequirementIds.length > 0
@@ -451,9 +676,6 @@ function parseGlobalCodeStyleRules(content) {
         : normalizeSourceRequirementIds(stripped.sourceRequirementId)
       if (sourceIds.length > 0) {
         rule.sourceRequirementIds = sourceIds
-        const ladder = deriveCodeStyleConfidence(sourceIds)
-        rule.status = ladder.status
-        rule.confidence = ladder.confidence
       }
       rules.push(rule)
     }
@@ -464,11 +686,6 @@ function parseGlobalCodeStyleRules(content) {
     const key = `${r.section}::${normalizeContentForDedup(r.content)}`
     const prev = seen.get(key)
     if (prev) {
-      if (prev.strength === STRENGTH_HARD || r.strength === STRENGTH_HARD) {
-        r.strength = STRENGTH_HARD
-      } else if (!r.strength && prev.strength) {
-        r.strength = prev.strength
-      }
       const mergedApplies = Array.from(
         new Set([...(prev.applies || []), ...(r.applies || [])]),
       )
@@ -483,14 +700,65 @@ function parseGlobalCodeStyleRules(content) {
       ])
       if (mergedSources.length > 0) {
         r.sourceRequirementIds = mergedSources
-        const ladder = deriveCodeStyleConfidence(mergedSources)
-        r.status = ladder.status
-        r.confidence = ladder.confidence
       }
     }
     seen.set(key, r)
   }
   return Array.from(seen.values())
+}
+
+function parseStructuredCodeStyleRules(content) {
+  const section = stripMarkdownHtmlComments(extractMarkdownSection(content, 'Rules by Layer'))
+  if (!section) return []
+  const heads = []
+  const re = /^###\s+`?([^`\n]+?)`?\s*$/gm
+  let m
+  while ((m = re.exec(section)) !== null) {
+    const id = String(m[1] || '').trim()
+    if (!id || id === 'layer-id' || id.includes('<') || id.includes('>')) continue
+    heads.push({ id, index: m.index, end: re.lastIndex })
+  }
+  const out = []
+  for (let i = 0; i < heads.length; i++) {
+    const cur = heads[i]
+    const next = heads[i + 1]
+    const body = section.slice(cur.end, next ? next.index : section.length)
+    const should = parseBulletSublist(body, 'should')
+    for (const line of should) {
+      const rule = parseStructuredRuleLine(line, cur.id)
+      if (rule) out.push(rule)
+    }
+  }
+  return out
+}
+
+function parseStructuredRuleLine(raw, layerId) {
+  let text = String(raw || '').trim()
+  if (!text || text === '(none)') return null
+  let section = normalizeCodingPatchSection(layerId)
+  const sectionMatch = text.match(/^`?([a-zA-Z0-9_.-]+)`?\s*[:：]\s*(.+)$/)
+  if (sectionMatch) {
+    section = normalizeCodingPatchSection(sectionMatch[1])
+    text = sectionMatch[2].trim()
+  }
+  const stripped = stripAppliesSuffix(text)
+  const strippedStrength = stripStrengthPrefix(stripped.content)
+  const content = normalizeCodingPatchContent(strippedStrength.content)
+  if (!content) return null
+  const rule = {
+    section,
+    content,
+    layers: stripped.layers || [layerId],
+  }
+  if (strippedStrength.strength) rule.strength = strippedStrength.strength
+  if (stripped.applies) rule.applies = stripped.applies
+  const sourceIds = stripped.sourceRequirementIds && stripped.sourceRequirementIds.length > 0
+    ? stripped.sourceRequirementIds
+    : normalizeSourceRequirementIds(stripped.sourceRequirementId)
+  if (sourceIds.length > 0) {
+    rule.sourceRequirementIds = sourceIds
+  }
+  return rule
 }
 
 // 简易 glob → RegExp：支持 `**`（跨段，可匹配 0 段目录）、`*`（单段非 /）、精确字面
@@ -609,10 +877,6 @@ function formatAppliesSuffix(applies) {
   return norm ? ` (applies: ${norm.join(', ')})` : ''
 }
 
-function formatLayersSuffix(layers) {
-  const norm = normalizeCodingPatchLayers(layers)
-  return norm ? ` (layers: ${norm.join(', ')})` : ''
-}
 
 function collectUnmappedTechnicalSignals(rejectedItems) {
   const signals = []
@@ -632,7 +896,7 @@ function collectUnmappedTechnicalSignals(rejectedItems) {
       }
       if (
         /^missing layers$/i.test(String(reason || '')) ||
-        /^architecture-layers is empty$/i.test(String(reason || ''))
+        /^code-style Layers section is empty$/i.test(String(reason || ''))
       ) {
         const section = normalizeCodingPatchSection(patch.section)
         if (section && !seen.has(section)) {
@@ -645,70 +909,53 @@ function collectUnmappedTechnicalSignals(rejectedItems) {
   return signals
 }
 
-// 渲染单行规则：`- [section] [Hard] content (layers: ...) (applies: ...) (source: ...) (基于: ...)`
-// 行格式保持与 parseGlobalCodeStyleRules 完全兼容，以便合并时可反解析
-function renderRuleLine(rule, options = {}) {
+
+// 按 layers[0] 分组输出结构化格式，与模板 code-style.md 保持一致
+
+function renderStructuredRulesByLayer(rules, options = {}) {
+  const layerMap = new Map()
+  const unmappedBucket = []
+  for (const rule of rules) {
+    const layers = normalizeCodingPatchLayers(rule.layers)
+    if (!layers || layers.length === 0) {
+      unmappedBucket.push(rule)
+      continue
+    }
+    const primary = layers[0]
+    if (!layerMap.has(primary)) layerMap.set(primary, [])
+    layerMap.get(primary).push(rule)
+  }
+  const lines = []
+  const sortedLayers = Array.from(layerMap.keys()).sort()
+  for (const layer of sortedLayers) {
+    lines.push(`### \`${layer}\``)
+    lines.push('- should:')
+    for (const rule of layerMap.get(layer)) {
+      lines.push(`  - ${renderStructuredRuleLine(rule)}`)
+    }
+    lines.push('')
+  }
+  if (unmappedBucket.length > 0) {
+    lines.push('### `unmapped`')
+    lines.push('- should:')
+    for (const rule of unmappedBucket) {
+      lines.push(`  - ${renderStructuredRuleLine(rule)}`)
+    }
+    lines.push('')
+  }
+  if (sortedLayers.length === 0 && unmappedBucket.length === 0) {
+    lines.push('_（暂无全局规则，由需求归档逐步填充）_', '')
+  }
+  return lines.join('\n').replace(/\n+$/, '\n')
+}
+
+function renderStructuredRuleLine(rule) {
   const section = normalizeCodingPatchSection(rule.section)
   const content = normalizeCodingPatchContent(rule.content)
   const strength = normalizeCodingPatchStrength(rule.strength)
-  const strengthTag = strength ? `[${strength === STRENGTH_HARD ? 'Hard' : 'Soft'}] ` : ''
-  const layers = formatLayersSuffix(rule.layers)
-  const applies = formatAppliesSuffix(rule.applies)
-  const parts = [`- [${section}] ${strengthTag}${content}${layers}${applies}`]
-  // source 来源策略：优先用规则自身字段；defaultSource 仅在 includeDefaultSource=true 时兜底
-  // 这样可避免把 requirementId 误贴到 "Reused From Global" 段
-  const ownSource = String((rule && rule.sourceRequirementId) || '').trim()
-  const defaultSource = options.includeDefaultSource === true
-    ? String(options.defaultSource || '').trim()
-    : ''
-  const source = ownSource || defaultSource
-  if (source && options.includeSource !== false) parts[0] += ` (source: ${source})`
-  const sources = normalizeSourceRequirementIds(rule.sourceRequirementIds)
-  if (sources.length > 0 && options.includeSources === true) {
-    const ladder = deriveCodeStyleConfidence(sources)
-    parts[0] += ` (sources: ${sources.join(', ')})`
-    parts[0] += ` (status: ${ladder.status}, confidence: ${ladder.confidence})`
-  }
-  const basedOn = normalizeCodingPatchBasedOn(rule.basedOn)
-  if (basedOn) parts[0] += ` (基于: ${basedOn})`
-  return parts[0]
-}
-
-// 按 applies 分组输出主视图；无 applies 归到 `*` 桶
-function renderRulesByScope(rules, options = {}) {
-  const scopeMap = new Map()
-  const globalBucket = []
-  for (const rule of rules) {
-    const applies = Array.isArray(rule.applies) ? rule.applies.filter(Boolean) : []
-    if (applies.length === 0) {
-      globalBucket.push(rule)
-      continue
-    }
-    for (const g of applies) {
-      if (!scopeMap.has(g)) scopeMap.set(g, [])
-      scopeMap.get(g).push(rule)
-    }
-  }
-  const lines = []
-  const scopes = Array.from(scopeMap.keys()).sort((a, b) => a.localeCompare(b))
-  for (const scope of scopes) {
-    lines.push(`### \`${scope}\``)
-    for (const rule of scopeMap.get(scope)) {
-      lines.push(renderRuleLine(rule, options))
-    }
-    lines.push('')
-  }
-  if (globalBucket.length > 0) {
-    lines.push('### `*` (全局 / 无 applies)')
-    for (const rule of globalBucket) {
-      lines.push(renderRuleLine(rule, options))
-    }
-    lines.push('')
-  }
-  if (scopes.length === 0 && globalBucket.length === 0) {
-    lines.push('- (none)', '')
-  }
-  return lines.join('\n').replace(/\n+$/, '\n')
+  const renderedContent = strength ? `[${strength === 'hard' ? 'Hard' : 'Soft'}] ${content}` : content
+  let line = `${section}: ${renderedContent}${formatAppliesSuffix(rule.applies)}`
+  return line
 }
 
 function renderRequirementCodeStyleMarkdown(payload) {
@@ -721,20 +968,17 @@ function renderRequirementCodeStyleMarkdown(payload) {
       .filter(Boolean)),
   )
   const lines = [
-    '# Requirement Code Style',
+    `# 代码规范（需求 ${requirementId || '(unknown)'}）`,
     '',
-    `- Requirement: ${requirementId || '(unknown)'}`,
-    `- Generated At: ${new Date().toISOString()}`,
-    '',
-    '> 本文件仅记录本需求发现的代码规范增量，用于归档时合并到全局规范；',
-    '> 已存在的全局规范只在 Plan / Implement 阶段作为上下文参考，不在需求目录重复复制。',
+    '> 本文档只记录本需求发现的代码规范增量，用于归档时合并到全局 code-style.md。',
+    '> 已存在的全局规范只作为上下文参考，不在需求目录重复复制。',
     '',
   ]
 
   function pushRulesByLayer(title, rules, options) {
     lines.push(title)
     if (rules.length === 0) {
-      lines.push('- (none)')
+      lines.push('_（无）_')
       return
     }
     const buckets = new Map()
@@ -746,18 +990,19 @@ function renderRequirementCodeStyleMarkdown(payload) {
       }
     }
     for (const layer of Array.from(buckets.keys()).sort((a, b) => a.localeCompare(b))) {
-      lines.push(`### ${layer}`)
+      lines.push(`### \`${layer}\``)
+      lines.push('- should:')
       for (const rule of buckets.get(layer)) {
-        lines.push(renderRuleLine(rule, options))
+        lines.push(`  - ${renderStructuredRuleLine(rule)}`)
       }
       lines.push('')
     }
   }
 
-  pushRulesByLayer('## Requirement Additions (to merge on archive)', requirementAdditions, { defaultSource: requirementId })
+  pushRulesByLayer('## Additions（本次需求新增；归档时回流全局）', requirementAdditions, { defaultSource: requirementId })
   lines.push('')
   pushRulesByLayer(
-    '## Requirement Overrides (requirement-scope only; not merged to global)',
+    '## Overrides（本次需求的临时覆盖；不回流全局）',
     requirementOverrides,
     { includeSource: false },
   )
@@ -788,14 +1033,15 @@ function writeRequirementCodeStyleArtifacts(workspaceRoot, requirementId, planCo
   const split = splitRulesByGlobal(workspaceRoot, filtered.accepted)
   const existingPatch = options.mergePatch ? safeReadJson(reqPatchPath, []) : []
   const existingFiltered = filterCodingPatchesForCodeStyle(workspaceRoot, existingPatch)
+  const existingSplit = splitRulesByGlobal(workspaceRoot, existingFiltered.accepted)
   const rejected = [...filtered.rejected, ...existingFiltered.rejected]
   const unmappedSignals = collectUnmappedTechnicalSignals(rejected)
   if (filtered.architectureLayersEmpty || existingFiltered.architectureLayersEmpty) {
-    unmappedSignals.push('architecture-layers is empty')
+    unmappedSignals.push('code-style Layers section is empty')
   }
   // additions 与 overrides 一起合入 patch（kind 区分；归档侧仅回灌 additions）
   const mergedPatch = mergeCodingPatches(
-    existingFiltered.accepted,
+    [...existingSplit.requirementAdditions, ...existingSplit.requirementOverrides],
     [...split.requirementAdditions, ...split.requirementOverrides],
     { sourceRequirementId },
   )
@@ -825,11 +1071,28 @@ function writeRequirementCodeStyleArtifacts(workspaceRoot, requirementId, planCo
     rejectedCount: rejected.length,
     rejected,
     unmappedSignals,
-    reusedFromGlobalCount: split.existingInGlobal.length,
+    reusedFromGlobalCount: split.existingInGlobal.length + existingSplit.existingInGlobal.length,
     additionsCount: mergedAdditions.length,
     overridesCount: mergedOverrides.length,
-    newAdditionsCount: mergedAdditions.length - existingFiltered.accepted.length,
+    newAdditionsCount: mergedAdditions.length - existingSplit.requirementAdditions.length,
     globalCodeStylePath: split.globalPath,
+  }
+}
+
+function normalizePlanForCodeStyleSync(planContent) {
+  return String(planContent || '')
+    .replace(
+      /^(\s*-\s+)\[[\s?!x]\](\s+\*\*[^*]+\*\*)/gm,
+      '$1[ ]$2',
+    )
+    .replace(/[ \t]+$/gm, '')
+    .trim()
+}
+
+function buildCodeStyleSyncSnapshot(planContent) {
+  const normalized = normalizePlanForCodeStyleSync(planContent)
+  return {
+    hash: crypto.createHash('sha256').update(normalized).digest('hex'),
   }
 }
 
@@ -844,8 +1107,6 @@ function safeReadJson(filePath, fallback) {
 module.exports = {
   PATCH_KIND_ADDITION,
   PATCH_KIND_OVERRIDE,
-  STRENGTH_HARD,
-  STRENGTH_SOFT,
   normalizeCodingPatchSection,
   normalizeCodingPatchContent,
   normalizeCodingPatchKind,
@@ -854,10 +1115,14 @@ module.exports = {
   normalizeCodingPatchLayers,
   normalizeCodingPatchStrength,
   normalizeSourceRequirementIds,
-  deriveCodeStyleConfidence,
   parseArchitectureLayers,
+  parseCodeStyleLayers,
+  parseCodeStyleSops,
+  extractMarkdownSection,
+  replaceMarkdownSection,
   readArchitectureLayers,
   isArchitectureLayersCalibrated,
+  isGlobalCodeStylePopulated,
   filterCodingPatchesForCodeStyle,
   stripStrengthPrefix,
   normalizeContentForDedup,
@@ -870,9 +1135,11 @@ module.exports = {
   globToRegExp,
   matchRulesForPaths,
   extractTaskFilePaths,
-  renderRuleLine,
-  renderRulesByScope,
+  renderStructuredRulesByLayer,
+  renderStructuredRuleLine,
   collectUnmappedTechnicalSignals,
   renderRequirementCodeStyleMarkdown,
   writeRequirementCodeStyleArtifacts,
+  normalizePlanForCodeStyleSync,
+  buildCodeStyleSyncSnapshot,
 }

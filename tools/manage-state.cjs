@@ -23,10 +23,14 @@
  *   clear-resource-failed [url] — 从 .temp/resource-load-failed.json 的失败映射中移除：指定 url 则只删该 key；不传 url 则清空整个文件
  *   reset-retry — 重置 groupRetryCount 为 0（死循环保护后人工修复用）
  *   ack-specify-before-plan — 记录用户已在弹窗确认进入 Plan（写入 gates.json: plan.user_confirm_start；兼容写入旧 state mtime）
+ *   ack-plan-before-implement [groupId] [--auto] — 记录用户已审阅 plan.md 并确认进入 Implement；可同时选择首个 Group 与是否自动托管（写入 gates.json: implement.user_confirm_start）
+ *   ack-specify-preview — 记录产品视角预审通过，可进入正式 specify 成文（写入 gates.json: specify.product_preview）
+ *   mark-specify-preview-blocked [reason] — 记录产品预审阻塞（写入 gates.json: specify.product_preview=blocked；仍应生成产品澄清状态）
  *   ack-specify-review [confirmed|mock_allowed|not_required] — 记录架构师已完成对 specify 的评审且无阻塞（写入 gates.json: plan.readiness_review；兼容写入旧 state）
  *   mark-specify-review-blocked [reason] — 记录技术前置评审阻塞（写入 gates.json: plan.readiness_review=blocked；仍应生成技术澄清状态）
  *   ack-auto-clarifications — 记录用户已审阅并确认自动解决的澄清（写入 autoClarificationAckMtime = 当前 specify.md mtime）
  *   answer-clarification <cqId> <answer> — 将 .temp/clarifications.json 中对应澄清写入 answer 并标记 closed
+ *   answer-clarifications <json> — 批量写回澄清答案；json 支持数组 [{id, answer}] 或对象 {"CQ-1":"answer"}
  *   set-domain-init-pref <scan|skip> [领域身份] — 记录业务知识库领域初始化结果。scan 时必须提供领域身份（如 services/order::payment，支持逗号分隔），写入 domainInitRefs；并清空 domainInitCandidateRefs。skip 时清除所有领域字段
  *   set-domain-init-candidates <ref_csv> — S1 阶段：agent 分析项目后提交领域身份候选（逗号分隔），写入 domainInitCandidateRefs；引擎下一轮基于候选生成 N 道 yes/no 采纳题
  *   clear-domain-init-candidates — 清空 domainInitCandidateRefs（用于反悔 / 重新提交）
@@ -45,14 +49,17 @@ const {
   fileSnapshot,
 } = require('./gates.cjs')
 const { syncResidualToState } = require('./residual-metrics.cjs')
-const { parseMarkdownTree, findByKey, renderNode, parseGroupsFromTree } = require('./plan-parser.cjs')
+const { parseMarkdownTree, findByKey, renderNode, parseClarificationFromTree } = require('./plan-parser.cjs')
 const {
   normalizeCodingPatchSection,
   normalizeCodingPatchContent,
   mergeCodingPatches: mergeCodingPatchesShared,
   writeRequirementCodeStyleArtifacts,
+  buildCodeStyleSyncSnapshot,
   filterCodingPatchesForCodeStyle,
   stripAppliesSuffix,
+  stripStrengthPrefix,
+  replaceMarkdownSection,
 } = require('./code-style.cjs')
 const { parseDomainMd } = require('./domain-knowledge.cjs')
 
@@ -66,10 +73,14 @@ const ACTIONS = [
   'ack-code-style-sync',
   'recalibrate-layers',
   'ack-specify-before-plan',
+  'ack-plan-before-implement',
+  'ack-specify-preview',
+  'mark-specify-preview-blocked',
   'ack-specify-review',
   'mark-specify-review-blocked',
   'ack-auto-clarifications',
   'answer-clarification',
+  'answer-clarifications',
   'set-domain-init-pref',
   'set-domain-init-candidates',
   'clear-domain-init-candidates',
@@ -83,7 +94,6 @@ const ACTIONS = [
 /** 状态标记与 Markdown checkbox 的映射 */
 const STATUS_TO_MARKER = { pending: ' ', 'ready-for-qa': '?', failed: '!', completed: 'x' }
 const MARKER_TO_STATUS = { ' ': 'pending', '?': 'ready-for-qa', '!': 'failed', x: 'completed' }
-const ROADMAP_STATUS_OVERVIEW_ANCHOR = '<!-- specflow:roadmap-status-overview -->'
 
 /** 合法的状态转换规则 */
 const VALID_TRANSITIONS = {
@@ -93,83 +103,7 @@ const VALID_TRANSITIONS = {
   completed: [],
 }
 
-function deriveGroupDisplayStatus(counts) {
-  const pending = counts.pending || 0
-  const readyForQA = counts.readyForQA || 0
-  const failed = counts.failed || 0
-  const completed = counts.completed || 0
-  const total = pending + readyForQA + failed + completed
-
-  if (total === 0) return '无任务'
-  if (failed > 0) return '需修复'
-  if (pending === 0 && failed === 0 && readyForQA > 0) return '待验收'
-  if (pending > 0 || readyForQA > 0) return '进行中'
-  return '已完成'
-}
-
-function renderRoadmapStatusOverview(content) {
-  let groups = []
-  try {
-    const tree = parseMarkdownTree(content)
-    groups = parseGroupsFromTree(tree)
-  } catch (_) {
-    groups = []
-  }
-
-  const totals = { pending: 0, readyForQA: 0, failed: 0, completed: 0 }
-  const rows = groups.map((group) => {
-    const counts = group.counts || {}
-    totals.pending += counts.pending || 0
-    totals.readyForQA += counts.readyForQA || 0
-    totals.failed += counts.failed || 0
-    totals.completed += counts.completed || 0
-    const label = group.name ? `${group.id}: ${group.name}` : group.id
-    return `| ${label} | ${deriveGroupDisplayStatus(counts)} | ${counts.pending || 0} | ${counts.readyForQA || 0} | ${counts.failed || 0} | ${counts.completed || 0} |`
-  })
-
-  if (groups.length > 1) {
-    rows.push(
-      `| Total | ${deriveGroupDisplayStatus(totals)} | ${totals.pending} | ${totals.readyForQA} | ${totals.failed} | ${totals.completed} |`,
-    )
-  }
-  if (rows.length === 0) {
-    rows.push('| - | 无任务 | 0 | 0 | 0 | 0 |')
-  }
-
-  return [
-    '### Roadmap Status Overview',
-    ROADMAP_STATUS_OVERVIEW_ANCHOR,
-    '',
-    '| Group | 状态 | 待开发 | 待验收 | 需修复 | 已完成 |',
-    '|-------|------|--------|--------|--------|--------|',
-    ...rows,
-    '',
-  ].join('\n')
-}
-
 function syncRoadmapStatusOverview(content) {
-  const overview = renderRoadmapStatusOverview(content)
-  const existingRe =
-    /^### Roadmap Status Overview\s*\n<!-- specflow:roadmap-status-overview -->[\s\S]*?(?=^###\s+(?:📦\s*)?Group\s+\w+|^###\s+🏁|^##\s+5\.|$)/m
-
-  if (existingRe.test(content)) {
-    return content.replace(existingRe, overview)
-  }
-
-  const firstGroup = content.match(/^###\s+(?:📦\s*)?Group\s+\w+.*$/m)
-  if (firstGroup && typeof firstGroup.index === 'number') {
-    return `${content.slice(0, firstGroup.index)}${overview}\n${content.slice(firstGroup.index)}`
-  }
-
-  const roadmapAnchor = '<!-- specflow:section=roadmap -->'
-  const anchorIndex = content.indexOf(roadmapAnchor)
-  if (anchorIndex >= 0) {
-    const insertAt = content.indexOf('\n', anchorIndex + roadmapAnchor.length)
-    if (insertAt >= 0) {
-      return `${content.slice(0, insertAt + 1)}\n${overview}\n${content.slice(insertAt + 1)}`
-    }
-  }
-
   return content
 }
 
@@ -236,7 +170,7 @@ function isClarificationClosed(item) {
 function writeClarificationAnswer(dir, cqId, answer) {
   const clarificationPath = path.join(dir, '.temp', 'clarifications.json')
   if (!fs.existsSync(clarificationPath)) {
-    fail(`clarifications.json 不存在: ${clarificationPath}`)
+    return writeMarkdownClarificationAnswer(dir, cqId, answer)
   }
   const raw = safeReadJson(clarificationPath, null)
   if (!raw) fail('clarifications.json 无法解析')
@@ -278,6 +212,78 @@ function writeClarificationAnswer(dir, cqId, answer) {
   }
 }
 
+function writeMarkdownClarificationAnswer(dir, cqId, answer) {
+  const specifyPath = path.join(dir, 'specify.md')
+  if (!fs.existsSync(specifyPath)) {
+    fail(`clarifications.json 不存在，且 specify.md 不存在: ${specifyPath}`)
+  }
+
+  const original = fs.readFileSync(specifyPath, 'utf-8')
+  const escapedId = String(cqId || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(
+    `(^|\\n)(#{3,6}\\s+\\[\\?\\]\\s*${escapedId}\\s*[:：][^\\n]*\\n[\\s\\S]*?)(?=\\n#{3,6}\\s+\\[\\?\\]\\s*CQ|\\n##\\s+|$)`,
+  )
+  const match = original.match(re)
+  if (!match) fail(`未找到澄清项: ${cqId}`)
+
+  const block = match[2]
+  const answerText = String(answer || '').trim()
+  const userMarkerRe = /(#{4,6}\s+\*\*\[User\]\*\*\s*[:：]?\s*)([\s\S]*?)$/i
+  let nextBlock
+  if (userMarkerRe.test(block)) {
+    nextBlock = block.replace(userMarkerRe, `$1\n${answerText}\n`)
+  } else {
+    nextBlock = `${block.trimEnd()}\n\n#### **[User]**:\n${answerText}\n`
+  }
+
+  const next = original.slice(0, match.index) + match[1] + nextBlock + original.slice(match.index + match[0].length)
+  fs.writeFileSync(specifyPath, next, 'utf-8')
+
+  const tree = parseMarkdownTree(next)
+  const parsed = parseClarificationFromTree(tree, next)
+  return {
+    ok: true,
+    id: cqId,
+    allClosed: !parsed.open,
+    openCount: parsed.openCount,
+    path: specifyPath,
+  }
+}
+
+function parseClarificationAnswerBatch(input) {
+  let parsed
+  try {
+    parsed = JSON.parse(String(input || ''))
+  } catch (e) {
+    fail(`answer-clarifications 需要合法 JSON: ${e.message || e}`)
+  }
+
+  if (Array.isArray(parsed)) {
+    return parsed.map((item, idx) => {
+      if (!item || typeof item !== 'object') {
+        fail(`answer-clarifications 第 ${idx + 1} 项必须是对象`)
+      }
+      const id = String(item.id || item.cqId || '').trim()
+      const answer = String(item.answer || item.value || '').trim()
+      if (!id) fail(`answer-clarifications 第 ${idx + 1} 项缺少 id`)
+      if (!answer) fail(`answer-clarifications 第 ${idx + 1} 项缺少 answer`)
+      return { id, answer }
+    })
+  }
+
+  if (parsed && typeof parsed === 'object') {
+    return Object.entries(parsed).map(([id, answer]) => {
+      const cqId = String(id || '').trim()
+      const text = String(answer || '').trim()
+      if (!cqId) fail('answer-clarifications 存在空 id')
+      if (!text) fail(`answer-clarifications ${cqId} 缺少 answer`)
+      return { id: cqId, answer: text }
+    })
+  }
+
+  fail('answer-clarifications JSON 必须是数组或对象')
+}
+
 function parseDomainRefList(input) {
   const raw = String(input || '')
   if (!raw.trim()) return []
@@ -303,16 +309,32 @@ function resetArchitectureLayersFile(workspaceRoot) {
   const fallbackHeader = [
     '# Architecture Layers',
     '',
-    '> 本文件描述当前项目自己的代码分层画像。SpecFlow 不预设前端/后端层名；由 agent 基于目录、配置、既有代码和规范生成并迭代维护。',
-    '> 初始化阶段只写低风险骨架；需求中发现的新分层先作为候选，归档评审通过后再稳定进入本文件。',
+    '> 项目架构分层画像。`code-style.md` 中的规则只能引用本文件 `## Layers` 下已存在的 layer id。',
     '',
   ].join('\n')
   const existing = fs.existsSync(layersPath) ? fs.readFileSync(layersPath, 'utf-8') : ''
-  const marker = existing.match(/^##\s+Layers\s*$/m)
-  const header = marker && typeof marker.index === 'number'
-    ? existing.slice(0, marker.index).replace(/\s+$/, '')
-    : (existing.trim() ? existing.trim() : fallbackHeader.trim())
-  const next = `${header}\n\n## Layers\n\n- (empty)\n`
+  const layersSkeleton = [
+    '<!-- specflow:section Layers -->',
+    '<!--',
+    'Layer entry schema:',
+    '### `layer-id`',
+    '- globs:',
+    '  - `path/glob`',
+    '- role: stable responsibility boundary',
+    '- should:',
+    '  - positive rule',
+    '- should_not:',
+    '  - negative rule',
+    '- evidence:',
+    '  - `representative/file`',
+    '-->',
+    '',
+    '_（待 agent 校准填充）_',
+  ].join('\n')
+  const base = existing.trim()
+    ? existing
+    : `${fallbackHeader.trim()}\n\n## Layers\n\n${layersSkeleton}\n`
+  const next = replaceMarkdownSection(base, 'Layers', layersSkeleton)
   fs.mkdirSync(path.dirname(layersPath), { recursive: true })
   fs.writeFileSync(layersPath, next, 'utf-8')
   return layersPath
@@ -331,9 +353,11 @@ function extractCodingStandardPatchesFromEvidence(evidence) {
     if (m) {
       const section = normalizeCodingPatchSection(m[1] || 'general')
       const stripped = stripAppliesSuffix(m[2])
-      const content = normalizeCodingPatchContent(stripped.content)
+      const strengthInfo = stripStrengthPrefix(stripped.content)
+      const content = normalizeCodingPatchContent(strengthInfo.content)
       if (content) {
         const item = { section, content, extractedAt: new Date().toISOString() }
+        if (strengthInfo.strength) item.strength = strengthInfo.strength
         if (stripped.layers) item.layers = stripped.layers
         if (stripped.applies) item.applies = stripped.applies
         patches.push(item)
@@ -371,7 +395,7 @@ function appendCodingStandardPatchFromFailure(workspaceRoot, requirementId, evid
     fs.mkdirSync(reqTempDir, { recursive: true })
     fs.writeFileSync(patchPath, JSON.stringify(merged, null, 2), 'utf-8')
   }
-  // 失败补充后刷新需求内 code-style.md，保持“主规范 + 增量”可读视图
+  // 失败补充后刷新需求内 code-style.md；需求内只保留可归档增量，不复制全局规范
   writeRequirementCodeStyleArtifacts(workspaceRoot, requirementId, planContent || '', { mergePatch: true })
   return {
     generated: changed,
@@ -518,6 +542,26 @@ function dedupeKnowledgePatches(existing, incoming) {
   return Array.from(map.values())
 }
 
+// 从 business-domain.md 提取合法 domain ref（scope::slug），按优先级回退：
+//   1) frontmatter.domain
+//   2) H1 标题 `# Domain: scope::slug`
+//   3) 文件名反推（domainRefToFileStem 的逆：scope__slug.md -> scope::slug）
+// 任一来源能产出合法 ref 即采用，避免领域文件因缺 frontmatter 在归档时被整体跳过丢失。
+function resolveDomainRefFromBusinessDomain(parsed, fileName) {
+  const fromFrontmatter = normalizeDomainRefForPatch(parsed?.frontmatter?.domain || '')
+  if (fromFrontmatter) return fromFrontmatter
+  const h1 = String((parsed && parsed.preambleH1) || '')
+  const h1Match = h1.match(/^#\s*(?:Domain\s*[:：]\s*)?(.+?)\s*$/i)
+  if (h1Match) {
+    const fromH1 = normalizeDomainRefForPatch(h1Match[1])
+    if (fromH1) return fromH1
+  }
+  const stem = String(fileName || '').replace(/\.md$/i, '')
+  const fromFile = normalizeDomainRefForPatch(stem.replace(/__/g, '::'))
+  if (fromFile) return fromFile
+  return ''
+}
+
 function buildKnowledgePatchFromBusinessDomains(workspaceRoot, requirementId) {
   const domainDir = path.join(workspaceRoot, 'ai-docs', requirementId, 'business-domains')
   if (!fs.existsSync(domainDir) || !fs.statSync(domainDir).isDirectory()) return []
@@ -527,7 +571,7 @@ function buildKnowledgePatchFromBusinessDomains(workspaceRoot, requirementId) {
     const fullPath = path.join(domainDir, file)
     const content = fs.readFileSync(fullPath, 'utf-8')
     const parsed = parseDomainMd(content)
-    const domain = normalizeDomainRefForPatch(parsed?.frontmatter?.domain || '')
+    const domain = resolveDomainRefFromBusinessDomain(parsed, file)
     if (!domain) continue
     for (const category of ['entity', 'rule', 'stateMachine', 'formula', 'pitfall', 'techDebt']) {
       const rows = (parsed && parsed.buckets && parsed.buckets[category]) || []
@@ -633,21 +677,16 @@ function validateQaLiteEvidence(content, evidence, groupId) {
   const combined = `${String(evidence || '')}\n${String(content || '')}`
   const gid = String(groupId || '').trim()
   const nearGroup = !gid || new RegExp(gid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(combined)
-  const packetResult = gid ? validateCompletionPacket(content, gid) : { ok: true, missing: [] }
   const checks = [
     { id: 'QA Lite', re: /QA\s*Lite/i },
-    { id: 'Packet', re: /Packet|Completion Packet/i },
-    { id: 'AC', re: /\bAC\b|AC Mapping/i },
+    { id: 'AC', re: /\bAC\b|User AC/i },
     { id: 'Contract', re: /Contract|Local Contract/i },
     { id: 'Test Strategy', re: /Test Strategy|测试策略/i },
-    { id: 'Verification Matrix', re: /Verification Matrix|验证矩阵/i },
+    { id: 'Verification', re: /Verification|验证|evidence|证据/i },
   ]
   const missing = checks.filter((x) => !x.re.test(combined)).map((x) => x.id)
-  if (!packetResult.ok) {
-    missing.push(...packetResult.missing.map((x) => `Packet ${x}`))
-  }
   return {
-    ok: nearGroup && packetResult.ok && missing.length === 0,
+    ok: nearGroup && missing.length === 0,
     missing: nearGroup ? missing : ['Group ID', ...missing],
     error: nearGroup
       ? `QA Lite Evidence 缺少核对摘要: ${missing.join(', ')}`
@@ -656,18 +695,9 @@ function validateQaLiteEvidence(content, evidence, groupId) {
 }
 
 function enforceCompletionPacketGate(dir, content, groupId) {
-  const result = validateCompletionPacket(content, groupId)
-  if (!result.ok) {
-    blockGate(dir, 'implement.completion_packet_ready', {
-      subject: groupId,
-      reason: result.error,
-      evidence: result.missing.length > 0 ? `missing: ${result.missing.join(', ')}` : result.error,
-    })
-    fail(`${result.error}。请先在 plan.md Log 中写入完整 Completion Packet，再标记 ready-for-qa。`)
-  }
   ensureGateResult(passGate(dir, 'implement.completion_packet_ready', {
     subject: groupId,
-    evidence: `Completion Packet ready: ${groupId}`,
+    evidence: `ready-for-qa status evidence managed by task state: ${groupId}`,
   }))
 }
 
@@ -858,7 +888,7 @@ function main() {
       if (!fs.existsSync(planPath)) {
         fail('plan.md 不存在，无法记录 code-style 同步状态')
       }
-      const planSnapshot = fileSnapshot(workspaceRoot, path.join('ai-docs', requirementId, 'plan.md'))
+      const planSnapshot = buildCodeStyleSyncSnapshot(fs.readFileSync(planPath, 'utf-8'))
       const codeStylePath = path.join(dir, 'code-style.md')
       const patchPath = path.join(dir, '.temp', 'coding-standard-patch.json')
       const evidence = [
@@ -882,7 +912,7 @@ function main() {
         scope: 'global',
         subject: 'ai-docs/global-assets/standards/architecture-layers.md',
         reason: 'manual recalibration requested after unmapped technical signal',
-        evidence: 'architecture-layers Layers section cleared',
+        evidence: 'architecture-layers.md ## Layers section reset',
       }))
       console.log(
         JSON.stringify(
@@ -986,6 +1016,67 @@ function main() {
         evidence: 'user confirmed start plan',
       }))
       console.log(JSON.stringify({ ok: true, specifyAckMtime: mtimeMs }, null, 2))
+      break
+    }
+    case 'ack-plan-before-implement': {
+      const planPath = path.join(dir, 'plan.md')
+      if (!fs.existsSync(planPath)) {
+        fail('plan.md 不存在，无法确认进入 Implement')
+      }
+      const planSnapshot = fileSnapshot(workspaceRoot, path.join('ai-docs', requirementId, 'plan.md'))
+      const groupId = (named.group || named['group-id'] || named.groupId || extras[0] || '').trim()
+      const autoProceed = Boolean(boolFlags.has('auto') || boolFlags.has('auto-proceed'))
+      mergeState(dir, {
+        activeGroup: groupId || undefined,
+        autoProceedGroups: groupId ? autoProceed : false,
+        groupRetryCount: 0,
+      })
+      ensureGateResult(passGate(dir, 'plan.implement_approved', {
+        stage: 'Plan',
+        scope: 'plan',
+        subject: 'user approved plan for implementation',
+        snapshot: planSnapshot,
+        evidence: groupId
+          ? `user reviewed plan and approved implementation: ${groupId}${autoProceed ? ' auto' : ''}`
+          : 'user reviewed plan and approved implementation',
+      }))
+      ensureGateResult(passGate(dir, 'implement.user_confirm_start', {
+        stage: 'Implement',
+        scope: 'plan',
+        subject: 'user confirmed start implement',
+        snapshot: planSnapshot,
+        evidence: groupId
+          ? `user reviewed plan and confirmed start implement: ${groupId}${autoProceed ? ' auto' : ''}`
+          : 'user reviewed plan and confirmed start implement',
+      }))
+      console.log(JSON.stringify({
+        ok: true,
+        planSnapshot,
+        activeGroup: groupId || undefined,
+        autoProceedGroups: groupId ? autoProceed : false,
+      }, null, 2))
+      break
+    }
+    case 'ack-specify-preview': {
+      ensureGateResult(passGate(dir, 'specify.product_preview', {
+        stage: 'Specify',
+        scope: 'requirement',
+        subject: 'product clarification preview before specify',
+        evidence: named.evidence || extras[0] || 'product preview passed',
+      }))
+      console.log(JSON.stringify({ ok: true, gate: 'specify.product_preview', status: 'passed' }, null, 2))
+      break
+    }
+    case 'mark-specify-preview-blocked': {
+      const reason = (named.reason || extras[0] || '存在产品口径或验收阻塞，需先完成产品澄清').trim()
+      ensureGateResult(blockGate(dir, 'specify.product_preview', {
+        stage: 'Specify',
+        scope: 'requirement',
+        subject: 'product clarification preview before specify',
+        reason,
+        evidence: 'missing',
+      }))
+      console.log(JSON.stringify({ ok: true, gate: 'specify.product_preview', status: 'blocked', reason }, null, 2))
       break
     }
     case 'ack-specify-review': {
@@ -1108,6 +1199,29 @@ function main() {
       console.log(JSON.stringify(result, null, 2))
       break
     }
+    case 'answer-clarifications': {
+      const raw = named.answers || named.json || extras.join(' ')
+      if (!String(raw || '').trim()) fail('answer-clarifications 需要参数: <json>')
+      const answers = parseClarificationAnswerBatch(raw)
+      if (answers.length === 0) fail('answer-clarifications 至少需要 1 条答案')
+      const results = answers.map((item) => writeClarificationAnswer(dir, item.id, item.answer))
+      const last = results[results.length - 1]
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            answeredCount: results.length,
+            answeredIds: results.map((r) => r.id),
+            allClosed: last ? last.allClosed : false,
+            openCount: last ? last.openCount : 0,
+            path: last ? last.path : path.join(dir, '.temp', 'clarifications.json'),
+          },
+          null,
+          2,
+        ),
+      )
+      break
+    }
     case 'set-active-group': {
       const groupId = named['group'] || extras[0]
       const isAuto = boolFlags.has('auto') || named['auto'] === 'true'
@@ -1192,7 +1306,7 @@ function main() {
       }
       if (targetStatus === 'completed' && !evidence.trim()) {
         fail(
-          '标记为 completed 时必须提供验收证据（测试路径或输出摘要）。请先在 plan.md Log 中写入存证，再调用: mark-task <taskId> completed <evidence>',
+          '标记为 completed 时必须提供验收证据（测试路径或输出摘要）。请先准备 QA Lite Evidence，再调用: mark-task <taskId> completed <evidence>',
         )
       }
 
@@ -1206,7 +1320,7 @@ function main() {
         break
       }
 
-      // ready-for-qa 只执行结构门禁：Completion Packet / Verification Matrix 必须完整。
+      // ready-for-qa 不再要求 plan.md Execution Log；执行证据由任务状态机和 QA evidence 承接。
       let codingPatch = null
       if (targetStatus === 'ready-for-qa') {
         const groupId = findTaskGroupIdFromPlan(content, taskId)
@@ -1263,7 +1377,7 @@ function main() {
       }
       if (targetStatus === 'completed' && !evidence.trim()) {
         fail(
-          'mark-group 标记为 completed 时必须提供验收证据。请先在 plan.md Log 中写入存证，再调用: mark-group <groupId> completed <evidence>',
+          'mark-group 标记为 completed 时必须提供验收证据。请先准备 QA Lite Evidence，再调用: mark-group <groupId> completed <evidence>',
         )
       }
 

@@ -10,21 +10,15 @@
 - **非目标**:
   - [本期明确不做的能力、后续阶段、或不纳入本仓的内容]
 - **本仓职责边界**: [一句话写清本仓库负责交付什么；明显属于其他端/服务的内容标为「仅背景」]
+- **关键产品决策**:
+  - [仅保留 3-5 条会改变范围 / 验收 / 边界的高影响结论，一行一句；其余决策写入对应 Capability 的业务规则或验收要点]
 
 ---
 
-## 2. Product Decisions & Boundaries (产品决策与边界)
-<!-- specflow:section=product-decisions -->
-
-- **已确认产品决策**:
-  - [决策项]: [结论；依据 PRD / 用户回复 / 业务知识库 / 代码现状]
-
----
-
-## 3. Capabilities (功能切片)
+## 2. Capabilities (功能切片)
 <!-- specflow:section=capabilities -->
 
-### 3.1 [功能切片名称]
+### 2.1 [功能切片名称]
 - **用户目标**: [用户想完成什么]
 - **入口 / 触发条件**: [从哪里进入，什么条件下触发]
 - **主流程**:
@@ -41,7 +35,7 @@
 
 ---
 
-## 4. Business Objects & States (业务对象与状态)
+## 3. Business Objects & States (业务对象与状态)
 <!-- specflow:section=business-objects -->
 
 - **[业务对象]**: [定义、归属、关键属性语义；不写技术字段名]
@@ -54,7 +48,7 @@
 
 ---
 
-## 5. Decision Log (决策记录)
+## 4. Decision Log (决策记录)
 <!-- specflow:section=clarification-log -->
 
 - [D-001]: [用户澄清后的关键结论；记录问题、用户选择 / 补充、影响范围]
@@ -62,7 +56,7 @@
 
 ---
 
-## 6. Changelog (规格修改日志)
+## 5. Changelog (规格修改日志)
 <!-- specflow:section=changelog -->
 
 - **YYYY-MM-DD**: [变更摘要]

@@ -1,22 +1,22 @@
 # Architecture Layers
 
-> 本文件描述当前项目自己的代码分层画像。SpecFlow 不预设前端/后端层名；由 agent 基于目录、配置、既有代码和规范生成并迭代维护。
-> 初始化阶段只写低风险骨架；需求中发现的新分层先作为候选，归档评审通过后再稳定进入本文件。
-
-## Layer Template
-
-### `<layer-id>`
-
-- globs:
-  - `<layer-level-glob>`
-- role: `<一句话说明该层职责>`
-- should:
-  - `<该层应该承担的稳定职责>`
-- should_not:
-  - `<该层不应该承担的职责或依赖>`
-- evidence:
-  - `<目录、配置或典型文件证据>`
+> 项目架构分层画像。`code-style.md` 中的规则只能引用本文件 `## Layers` 下已存在的 layer id。
 
 ## Layers
 
-- (empty)
+<!-- specflow:section Layers -->
+<!--
+Layer entry schema:
+### `layer-id`
+- globs:
+  - `path/glob`
+- role: stable responsibility boundary
+- should:
+  - positive rule
+- should_not:
+  - negative rule
+- evidence:
+  - `representative/file`
+-->
+
+_（待 `specflow-architecture-layers` agent 基于真实仓库结构校准填充）_

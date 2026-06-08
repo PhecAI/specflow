@@ -92,6 +92,8 @@ node "$PLUGIN_ROOT/tools/manage-state.cjs" <action> [workspaceRoot] <需求号> 
 | `set-active-group` | `--group <groupId>`, `--auto`（布尔） |
 | `ack-specify-review` | `--contract-evidence confirmed\|mock_allowed\|not_required`（可选，默认 `confirmed`） |
 | `mark-specify-review-blocked` | `--reason <text>`（可选；用于阻止进入 Plan，仍需生成技术澄清状态） |
+| `answer-clarifications` | `--answers <json>`：批量写回澄清答案，支持数组 `[{ "id": "CQ-1", "answer": "..." }]` 或对象 `{ "CQ-1": "..." }` |
+| `ack-plan-before-implement` | `--group <groupId>`, `--auto`（布尔）；写入 `plan.implement_approved`，批准当前 plan 进入实现 |
 | `set-domain-init-pref` | `--pref scan\|skip`, `--ref <scope>::<slug>`（scan 时必填，支持逗号分隔多个）。自动清空 `domainInitCandidateRefs` |
 | `set-domain-init-candidates` | `--ref <csv>`：S1 阶段 agent 提交领域身份候选（尚未确认）；引擎下一轮基于候选生成 N 道 yes/no 采纳题 |
 | `clear-domain-init-candidates` | 无参；清空 `domainInitCandidateRefs`（反悔/重新提交） |

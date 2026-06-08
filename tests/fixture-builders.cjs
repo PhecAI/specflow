@@ -16,10 +16,8 @@ function specifyComplete(extraInBody = '') {
 - **本期范围**: Test scope.
 - **非目标**: None.
 - **本仓职责边界**: Test workspace.
-
-## Product Decisions & Boundaries
-<!-- specflow:section=product-decisions -->
-- **已确认产品决策**: Test decision.
+- **关键产品决策**:
+  - Test decision.
 
 ## Capabilities
 <!-- specflow:section=capabilities -->

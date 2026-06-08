@@ -71,16 +71,12 @@ function findSectionRobust(tree, anchorValue, titlePredicate) {
 
 const SECTION_REGISTRY = {
   architecture:     { anchor: 'architecture',      predicate: (n) => n.level === 2 && /architecture|架构/i.test(n.title) },
-  contract:         { anchor: 'contract',          predicate: (n) => n.level === 2 && /contract|技术契约/i.test(n.title) },
-  feature:          { anchor: 'feature',           predicate: (n) => n.level === 2 && /feature\s*&?\s*design|功能/i.test(n.title) },
   roadmap:          { anchor: 'roadmap',           predicate: (n) => n.level === 2 && /roadmap|执行路径/i.test(n.title) },
-  executionLog:     { anchor: 'execution-log',     predicate: (n) => n.level === 2 && /\blog\b|执行摘要/i.test(n.title) },
   overview:         { anchor: 'overview',          predicate: (n) => n.level === 2 && /requirement\s*overview|需求概览|背景与目标|背景与价值/i.test(n.title) },
   productDecisions: { anchor: 'product-decisions', predicate: (n) => n.level === 2 && /product\s*decisions|产品决策|决策与边界/i.test(n.title) },
   capabilities:     { anchor: 'capabilities',      predicate: (n) => n.level === 2 && /capabilities|功能切片|功能能力/i.test(n.title) },
   businessObjects:  { anchor: 'business-objects',  predicate: (n) => n.level === 2 && /business\s*objects|业务对象|对象与状态|状态/i.test(n.title) },
   clarificationLog: { anchor: 'clarification-log', predicate: (n) => n.level === 2 && /clarification|decision\s*log|决策记录|open\s*product\s*(?:decisions|questions)|待决策|待产品决策|待产品确认|待确认/i.test(n.title) },
-  changelog:        { anchor: 'changelog',         predicate: (n) => n.level === 2 && /changelog|修改日志/i.test(n.title) },
 }
 
 /** 按注册表 key 查找章节（锚点优先 + 标题兜底）。 */
@@ -174,7 +170,7 @@ function renderAcceptanceCriteriaIndex(items) {
   return lines.join('\n')
 }
 
-// ── 动态内容提取（Group / Feature ID 仍使用标题正则，不引入锚点）──
+// ── 动态内容提取（Group ID 仍使用标题正则，不引入锚点）──
 
 /**
  * 从标题中提取 Group ID 与名称。
@@ -184,12 +180,6 @@ function parseGroupId(title) {
   const m = title.match(/(Group\s+\w+)(?::\s*(.*))?/i)
   if (!m) return null
   return { id: m[1].trim(), name: (m[2] || '').trim() }
-}
-
-/** 从标题中提取 Feature ID（如 [F-01]）。 */
-function parseFeatureId(title) {
-  const m = title.match(/\[(F-\d+)\]/)
-  return m ? m[1] : null
 }
 
 // ── Plan 专用提取器 ─────────────────────────────────────────────────
@@ -295,6 +285,22 @@ function isClarificationUserClosed(cqBody) {
     .filter(Boolean)
   const substance = lines.filter((l) => !/^\*?\([^)]*\)\*?$/.test(l) && !/^[\*_]*\(User/.test(l))
   return substance.length > 0
+}
+
+function extractClarificationUserAnswer(cqBody) {
+  const primary = String(cqBody || '').match(
+    /####\s+\*\*\[User\]\*\*\s*[:：]\s*([\s\S]*?)(?=\n#{3,6}\s+\[\?\]\s*CQ|\n##\s|$)/,
+  )
+  const block = primary || String(cqBody || '').match(
+    /\*\*\[User\]\*\*\s*[:：]\s*([\s\S]*?)(?=\n#{3,6}\s+\[\?\]|\n###\s+\[\?\]|\n##\s+|$)/,
+  )
+  if (!block) return ''
+  const lines = block[1]
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((l) => !/^\*?\([^)]*\)\*?$/.test(l) && !/^[\*_]*\(User/.test(l))
+  return lines.join('\n').trim()
 }
 
 /** CQ-Contract / CQ-Tech（非 Init）：标准点选 + 补充说明输入框（与 init_requirement_* 同为双题）。 */
@@ -421,6 +427,7 @@ function parseClarificationText(text) {
     return { open: false, openCount: 0, questions: [], questionsAll: [] }
 
   const questions = []
+  const closedAnswers = []
   let openCount = 0
 
   const cqRegex =
@@ -432,6 +439,15 @@ function parseClarificationText(text) {
     const cqBody = m[5]
 
     if (isClarificationUserClosed(cqBody)) {
+      if (!cqId.startsWith('CQ-Domain-Init')) {
+        closedAnswers.push({
+          id: cqId,
+          type: 'clarification',
+          title: cqTitle,
+          answer: extractClarificationUserAnswer(cqBody),
+          source: 'specify.md',
+        })
+      }
       continue
     }
 
@@ -523,7 +539,7 @@ function parseClarificationText(text) {
     }
   }
 
-  return { open: openCount > 0, openCount, questions, questionsAll: questions }
+  return { open: openCount > 0, openCount, questions, questionsAll: questions, closedAnswers }
 }
 
 /**
@@ -539,6 +555,12 @@ function parseClarificationFromTree(tree, rawContent) {
     if (slice) {
       const fromSlice = parseClarificationText(slice)
       if (fromSlice.openCount > result.openCount) result = fromSlice
+      else if (
+        (Array.isArray(result.closedAnswers) ? result.closedAnswers.length : 0) === 0 &&
+        (Array.isArray(fromSlice.closedAnswers) ? fromSlice.closedAnswers.length : 0) > 0
+      ) {
+        result = { ...result, closedAnswers: fromSlice.closedAnswers }
+      }
     }
   }
   return result
@@ -604,30 +626,6 @@ function groupHasSelfContainedContext(groupText) {
   return labels.every((re) => re.test(groupText))
 }
 
-function extractRelevantExecutionLog(tree, activeGroupId) {
-  const logSection = findByKey(tree, 'executionLog')
-  if (!logSection) return ''
-
-  const rendered = renderNode(logSection)
-  const lines = rendered.split('\n')
-  const groupRe = new RegExp(escapeRegExp(activeGroupId), 'i')
-  const kept = []
-
-  for (let i = 0; i < lines.length; i++) {
-    if (!groupRe.test(lines[i])) continue
-
-    const start = Math.max(0, i - 1)
-    const end = Math.min(lines.length, i + 4)
-    for (let j = start; j < end; j++) {
-      if (kept[kept.length - 1] !== lines[j]) kept.push(lines[j])
-    }
-    if (end < lines.length) kept.push('')
-  }
-
-  const body = kept.join('\n').trim()
-  return body ? `## Recent Execution Log\n\n${body}` : ''
-}
-
 /**
  * 为 Implement/QA 子代理构建精简版 Plan 上下文（基于 AST）。
  * 最新格式要求 Task Group 自带 User AC / Local Contract / Test Strategy；缺失时不回退拼接旧上下文。
@@ -662,8 +660,6 @@ function buildFocusPlanFromTree(tree, activeGroupId) {
 
   if (groupHasSelfContainedContext(groupText)) {
     parts.push('## Active Task Group\n\n' + groupText)
-    const relevantLog = extractRelevantExecutionLog(tree, activeGroupId)
-    if (relevantLog) parts.push(relevantLog)
     return parts.filter(Boolean).join('\n\n---\n\n')
   }
 
@@ -672,7 +668,8 @@ function buildFocusPlanFromTree(tree, activeGroupId) {
 
 /**
  * 为 Plan 子代理构建精简版 Specify 上下文。
- * 新结构保留：Requirement Overview、Product Decisions、Capabilities、Business Objects。
+ * 新结构保留：Requirement Overview（含关键产品决策）、Capabilities、Business Objects。
+ * 兼容旧版 Product Decisions，但不要求存在。
  * 裁掉：Decision Log / Clarification Log、Changelog。
  */
 function buildFocusSpecify(specifyTree) {
@@ -704,7 +701,7 @@ function buildFocusSpecify(specifyTree) {
 /**
  * 为 Archive 子代理构建精简版归档上下文。
  * 从 specify 提取：业务摘要（Section 1）。
- * 从 plan 提取：Scope + Feature 标题与 Contract 摘要 + Log 全文。
+ * 从 plan 提取：Scope + Feature 摘要（旧格式）或 Roadmap Group 摘要（新格式）。
  */
 function buildFocusArchive(specifyTree, planTree) {
   if (!specifyTree && !planTree) return null
@@ -735,30 +732,33 @@ function buildFocusArchive(specifyTree, planTree) {
       if (scope) parts.push(scope)
     }
 
-    const featureSection = findByKey(planTree, 'feature')
-    if (featureSection && featureSection.children.length > 0) {
-      const featureSummaries = []
-      for (const fNode of featureSection.children) {
-        const fid = parseFeatureId(fNode.title)
-        if (!fid) continue
-        const fullText = renderNode(fNode)
-        const contractMatch = fullText.match(
-          /- \*\*Contract[^*]*\*\*[\s\S]*?(?=\n- \*\*Clarification|$)/i,
-        )
-        const contractSnippet = contractMatch ? contractMatch[0].trim() : ''
-        featureSummaries.push(
-          `### [${fid}] ${fNode.title.replace(/\[F-\d+\]\s*/, '')}` +
-            (contractSnippet ? '\n' + contractSnippet : ''),
-        )
+    const roadmapSection = findByKey(planTree, 'roadmap')
+    if (roadmapSection && roadmapSection.children.length > 0) {
+      const groupSummaries = []
+      for (const groupNode of roadmapSection.children) {
+        const gid = parseGroupId(groupNode.title)
+        if (!gid) continue
+        const text = renderNode(groupNode)
+        const lines = text.split('\n')
+        const kept = []
+        let keepBlock = false
+        for (const line of lines) {
+          const isTop = /^###\s+/.test(line)
+          const isWantedLabel = /^\s*-\s+\*\*(Goal|Depends on|User AC|Local Contract|Files|Test Strategy|Verification Contract|Group Verify)\*\*/i.test(line)
+          const isTask = /^\s*-\s+\[[ x?!]\]\s+/.test(line)
+          if (isTop || isWantedLabel || isTask) {
+            keepBlock = true
+            kept.push(line)
+            continue
+          }
+          if (keepBlock && /^\s{2,}-\s+/.test(line)) kept.push(line)
+          else if (!line.trim()) keepBlock = false
+        }
+        if (kept.length > 0) groupSummaries.push(kept.join('\n').trim())
       }
-      if (featureSummaries.length > 0) {
-        parts.push('## Feature Contracts (摘要)\n\n' + featureSummaries.join('\n\n'))
+      if (groupSummaries.length > 0) {
+        parts.push('## Roadmap Groups (摘要)\n\n' + groupSummaries.join('\n\n'))
       }
-    }
-
-    const logSection = findByKey(planTree, 'executionLog')
-    if (logSection) {
-      parts.push(renderNode(logSection))
     }
   }
 

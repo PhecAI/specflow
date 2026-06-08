@@ -278,13 +278,13 @@ try {
   const st = readState(reqDir)
   if (st.residual && typeof st.residual.totalScore === 'number') {
     const r = st.residual
-    console.log('\n### 结构化残差 (residual)\n')
+    console.log('\n### 剩余待处理项\n')
     console.log(
-      `- totalScore: ${r.totalScore}（AC 未闭环 ${r.unmetAcCount} | 局部验证失败 ${r.failedTestsCount} | 门禁 ${r.openGatesCount} | 待验收证据 ${r.missingEvidencesCount}）`,
+      `- 合计: ${r.totalScore}（验收条件未完成 ${r.unmetAcCount} | 验证失败 ${r.failedTestsCount} | 流程阻塞 ${r.openGatesCount} | 待补验收证据 ${r.missingEvidencesCount}）`,
     )
     if (Array.isArray(st.metricsHistory) && st.metricsHistory.length > 0) {
       const last = st.metricsHistory[st.metricsHistory.length - 1]
-      console.log(`- 最近快照: turn ${last.turn} → totalResidual ${last.totalResidual}`)
+      console.log(`- 最近检查: 第 ${last.turn} 轮，剩余 ${last.totalResidual}`)
     }
   }
 } catch (_) {}

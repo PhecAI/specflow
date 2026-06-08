@@ -78,7 +78,7 @@ function loadTemplateBody(pluginRoot, templateId) {
 }
 
 /**
- * 面向用户的残差摘要（中文，不含内部脚本名）。
+ * 面向用户的剩余事项摘要（中文，不含内部脚本名）。
  * @param {object} result - 含 residual、residualDelta、engineTurn
  */
 function buildResidualSummary(result) {
@@ -86,7 +86,7 @@ function buildResidualSummary(result) {
   if (!r || typeof r !== 'object') return ''
   const delta = result.residualDelta
   const turn = result.engineTurn
-  let head = `残差合计：${r.totalScore}`
+  let head = `剩余待处理项：${r.totalScore}`
   if (typeof delta === 'number' && delta !== 0) {
     head += `（${delta < 0 ? '较上轮减少' : '较上轮增加'} ${Math.abs(delta)}`
     if (typeof turn === 'number' && turn > 0) head += `，第 ${turn} 轮审计`
@@ -96,10 +96,10 @@ function buildResidualSummary(result) {
   }
   return [
     head,
-    `- 验收标准未闭环：${r.unmetAcCount}`,
-    `- 最近一次检查未通过项：${r.failedTestsCount}`,
-    `- 待处理前置条件：${r.openGatesCount}`,
-    `- 待补验收证据的任务：${r.missingEvidencesCount}`,
+    `- 验收条件未完成：${r.unmetAcCount}`,
+    `- 验证失败：${r.failedTestsCount}`,
+    `- 流程阻塞：${r.openGatesCount}`,
+    `- 待补验收证据：${r.missingEvidencesCount}`,
   ].join('\n')
 }
 
