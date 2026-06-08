@@ -1,2 +1,3 @@
 .tmp/
 ai-docs/
+dev-scripts/*.local.cjs
