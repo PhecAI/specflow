@@ -8,6 +8,12 @@ const fs = require('fs')
 const path = require('path')
 
 const ROOT = path.join(__dirname, '..')
+const {
+  parseMarkdownTree,
+  buildFocusPlanFromTree,
+  buildFocusSpecify,
+  isSpecifyCompleteFromTree,
+} = require(path.join(ROOT, 'tools', 'plan-parser.cjs'))
 
 function walk(dir, acc = []) {
   if (!fs.existsSync(dir)) return acc
@@ -39,6 +45,108 @@ test('layout-guard: 顶层运行时目录齐全（tools/protocols/templates/docs
   for (const dir of ['tools', 'protocols', 'templates', 'docs']) {
     assert.ok(fs.existsSync(path.join(ROOT, dir)), `缺失顶层目录：${dir}`)
   }
+})
+
+test('specify-template: 使用功能切片结构，不再生成独立 AC 章节', () => {
+  const tpl = fs.readFileSync(path.join(ROOT, 'templates', 'specify-template.md'), 'utf8')
+  assert.match(tpl, /specflow:section=capabilities/)
+  assert.match(tpl, /验收要点/)
+  assert.match(tpl, /\*\*\[AC-001\]\*\*/)
+  assert.doesNotMatch(tpl, /默认假设|推断/)
+  assert.doesNotMatch(tpl, /specflow:section=acceptance-criteria/)
+  assert.doesNotMatch(tpl, /^##\s+\d+\.\s+Acceptance Criteria/m)
+})
+
+test('plan-template: 只保留 architecture 与 roadmap 两个 Plan 锚点', () => {
+  const tpl = fs.readFileSync(path.join(ROOT, 'templates', 'plan-template.md'), 'utf8')
+  const anchors = [...tpl.matchAll(/specflow:section=([a-z-]+)/g)].map((m) => m[1])
+  assert.deepStrictEqual(anchors, ['architecture', 'roadmap'])
+  assert.doesNotMatch(tpl, /specflow:roadmap-status-overview/)
+  assert.doesNotMatch(tpl, /specflow:section=(contract|feature|execution-log|changelog)/)
+  assert.doesNotMatch(tpl, /AC 覆盖自检/)
+  assert.doesNotMatch(tpl, /Execution Log|Changelog/)
+})
+
+test('plan-parser: 新 Specify 结构可判定完整并进入 focusSpecify', () => {
+  const md = `# Spec
+
+## Requirement Overview
+<!-- specflow:section=overview -->
+- **目标**: 完成素材管理。
+
+- **关键产品决策**:
+  - 本期先支持 Mock 推进。
+
+## Capabilities
+<!-- specflow:section=capabilities -->
+### 3.1 素材批量上传
+- **用户目标**: 批量上传素材。
+- **验收要点**:
+  - **[AC-001]** 未选择文件时不能提交。
+
+## Business Objects & States
+<!-- specflow:section=business-objects -->
+- **素材**: 创意资产。
+
+## Decision Log
+<!-- specflow:section=clarification-log -->
+无额外决策记录。
+
+## Changelog
+<!-- specflow:section=changelog -->
+- Initial
+`
+  const tree = parseMarkdownTree(md)
+  assert.equal(isSpecifyCompleteFromTree(tree), true)
+  const focus = buildFocusSpecify(tree)
+  assert.match(focus, /Requirement Overview/)
+  assert.match(focus, /Capabilities/)
+  assert.match(focus, /素材批量上传/)
+  assert.match(focus, /Acceptance Criteria Index/)
+  assert.match(focus, /AC-001/)
+  assert.doesNotMatch(focus, /Decision Log/)
+})
+
+test('plan-parser: 旧 Specify 结构不再判完整，也不生成 focusSpecify', () => {
+  const md = `# Spec
+
+## Executive Summary
+<!-- specflow:section=executive-summary -->
+Legacy summary.
+
+## User Roles & Scenarios
+<!-- specflow:section=user-scenarios -->
+- User does a thing.
+
+## Acceptance Criteria
+<!-- specflow:section=acceptance-criteria -->
+- [x] Legacy AC.
+`
+  const tree = parseMarkdownTree(md)
+  assert.equal(isSpecifyCompleteFromTree(tree), false)
+  assert.equal(buildFocusSpecify(tree), null)
+})
+
+test('plan-parser: 非自足旧 Roadmap 不再回退拼接全局 Feature/Contract', () => {
+  const plan = [
+    '# Plan R1',
+    '',
+    '## 2. Technical Contracts',
+    '<!-- specflow:section=contract -->',
+    'GLOBAL CONTRACT SHOULD NOT LEAK',
+    '',
+    '## 3. Feature & Design',
+    '<!-- specflow:section=feature -->',
+    '### [F-01] Global Feature',
+    'GLOBAL FEATURE SHOULD NOT LEAK',
+    '',
+    '## 4. Roadmap',
+    '<!-- specflow:section=roadmap -->',
+    '### Group A: legacy',
+    '- [ ] **T-A1** | 旧任务 | F-01',
+  ].join('\n')
+  const focus = buildFocusPlanFromTree(parseMarkdownTree(plan), 'Group A')
+  assert.equal(focus, null)
 })
 
 test('layout-guard: 仓库内不应再出现 specflow-assets 路径片段', () => {

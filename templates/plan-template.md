@@ -1,10 +1,12 @@
 # Implementation Plan: [需求名称]
 
-<!-- 
-AI 模板使用说明：
-1. 采用资深系统架构师视角，负责将业务需求转化为可执行的技术方案。
-2. 定义核心的技术契约（API、数据模型、状态机等），作为开发的唯一依据。
-3. 任务拆解必须保持原子化，严格按照 Group 顺序执行。
+<!-- specflow:requirement=[需求号] -->
+<!--
+Plan 写作原则（架构师视角，单一 plan.md）：
+1. Implement 读 plan 即可开干：§1 建立心智模型，§2 的每个 Group 都是自足执行单元。
+2. 技术澄清在写 plan 之前完成；闭合结论优先写入对应 Group 的 Local Contract / Files / Test Strategy。只有跨多个 Group、且不在 Roadmap 中自然闭合的非显然结论，才写入「已确认技术决策」。
+3. Group 是唯一落地单元：User AC / Local Contract / Test Strategy 都直接挂在 Group 下。
+4. 后端未定时走 Mock 主线：§1.4 只保留一句话级 Mock 心智模型，具体对接数据写入各 Group 的 Local Contract。
 -->
 
 ---
@@ -12,92 +14,135 @@ AI 模板使用说明：
 ## 1. Architecture & Tech Stack (架构与技术栈)
 <!-- specflow:section=architecture -->
 
-- **Architecture**: [简述总体架构方案或设计模式。例如：BFF层聚合+后端微服务，或基于Vue3+Pinia的纯前端存储等]
-- **Tech Stack**: [列出核心技术栈、框架、关键依赖包]
+### 1.1 方案摘要
+
+- **Goal**: [一句话：本方案交付什么、联调前能否本地演示]
+- **PRD**: [链接或「见 specify §1」]
+- **Specify**: `ai-docs/[需求号]/specify.md`
+- **Delivery**: [Mock 先行可本地演示 | 直接联调 | 混合：UI mock + 部分真实接口]
+
+### 1.2 技术非目标
+
+> 从架构师视角声明本期**不做**什么（与 specify 非目标互补，写技术边界即可）。
+
+- [例：不做前端字节渠道尺寸本地校验；失败原因来自接口]
+- [例：不抽象到 packages/common；仅在当前子应用实现]
+
+### 1.3 已确认技术决策
+
+> 可选。只记录跨 Group 生效、且不会在 Implementation Roadmap 中完整体现的非显然技术结论。若所有结论已在各 Group 的 Local Contract / Files / Test Strategy / Verification Contract 中闭合，则写“无，技术结论已随 Group 内联”。
+
+| 项 | 决策 | 依据 |
+|----|------|------|
+| [例：跨组状态归属] | [统一由某稳定 store/composable 承载，避免多 Group 各自维护] | [技术澄清 / 存量架构] |
+
+### 1.4 架构与分层
+
+- **Architecture**: [总体方案：模块边界、分层、状态归属、与存量模块关系]
+- **Tech Stack**: [Vue 3 + TS + …]
+- **目录结构**（新建/修改范围）:
+
+```text
+[相对仓库根或子应用根的目录树，只列本需求触及路径]
+```
+
+- **边界红线**:
+  - **不得** [禁止引用的模块/错误复用路径]
+  - **不得** [禁止的行为]
+- **参考实现（SOP）**:
+  - [能力]: [仓库内具体文件路径]（[可选：`.cursor/rules/.../sop-*.mdc`]）
+- **CodeStyle 基线**: `ai-docs/global-assets/standards/architecture-layers.md`（分层画像）+ `ai-docs/global-assets/standards/code-style.md`（编码规则 + `## SOPs`）；需求内 `code-style.md` 仅记录新增/覆盖规则
+
+#### Mock 接入
+
+> 仅作为心智模型，不全面罗列接口。实际 API / DTO / 枚举 / 权限 / 常量必须写在各 Group 的 **Local Contract**。
+
+- **Mock 前缀**: `[例：/api/mock 或项目既有 mock base]`
+- **Mock 文件**: `[mock 路径；没有则写“无”]`
+- **Mock 总览**:
+  - `[一句话：Group A 使用列表分页 mock 支撑首屏与筛选]`
+  - `[一句话：Group B 使用详情 mock 支撑编辑回显]`
 
 ---
 
-## 2. Technical Contracts (技术契约)
-<!-- specflow:section=contract -->
-
-> **说明**：这是前后端、模块间的刚性技术接口，必须严谨。包括 API 定义、数据结构、状态机枚举等。**必须与 specify.md 的业务规则一致**。
-
-### 2.1 Data Models / State Machines (数据模型与状态机)
-- **[模型/状态机名称]**
-  - [字段/状态]: [类型/约束描述] (例如: `status` Enum { PENDING=0, APPROVED=1 })
-
-### 2.2 API / Interfaces (接口定义)
-- **[接口名称]** (`GET /api/v1/example`)
-  - **Request**: `{ "id": string }`
-  - **Response**: `{ "success": boolean, "data": [...] }`
-
----
-
-## 3. Feature Breakdown (功能与验证拆解)
-<!-- specflow:section=feature -->
-
-> **说明**：将 specify 的 AC (验收标准) 映射到具体的技术实现方案。
-
-### [F-01] [功能模块名称]
-- **Ref (关联 AC)**: `specify.md -> AC-01, AC-02`
-- **Design (实现方案)**: 修改 `[具体文件]`, 实现 [核心算法/逻辑描述]。
-- **Test Scope (测试验证范围)**:
-  > **标记说明**：**只有**需要走 TDD（红-绿-重构）的任务才标 `[TDD]`；其他任务**不加任何标记**，由 QA 以静态实现证据验收即可。
-  - **TS-01 [TDD]**: [测试场景描述。如：输入为空数组时返回默认值 0]
-  - **TS-02**: [测试场景描述。如：弹窗打开时，背景遮罩不可点击。无需标记，走静态验收]
-
-  > **QA 执行建议（soft；给出则直接用，未给出时 QA 自行按 git diff 推断）**：
-  - **Affected paths**: [glob 描述，例如 `src/content-library/**`、`packages/mini-program/src/content-library/**`]
-  - **Min spec whitelist（阶段 A 每批必跑）**: [逐条列出本 Group 日常 QA 必跑的 spec 路径，总量 ≤ 5 条]
-    - `[__tests__/unit/xxx.spec.ts]`
-  - **Smoke spec whitelist（Bug Fix 再验收用）**: [失败 spec 通过后跑的同模块冒烟 spec，≤ 3 条；可与 Min 重叠]
-    - `[__tests__/unit/yyy.spec.ts]`
-
----
-
-## 4. Implementation Roadmap (执行路径)
+## 2. Implementation Roadmap (执行路径)
 <!-- specflow:section=roadmap -->
 
-> **任务状态机**：
-> - `[ ]` **Pending** — 待开发（Implement 领取）
-> - `[?]` **Ready for QA** — 编码完成，待 QA 验收
-> - `[!]` **Failed** — QA 验证失败，需修复
-> - `[x]` **Completed** — QA 验证通过
->
-> **要求**：按 Group 顺序执行。每个 Task 必须明确且原子化，必须指明要操作的具体文件。
+> **任务状态机**：`[ ]` Pending · `[?]` Ready for QA · `[!]` Failed · `[x]` Completed  
+> **执行单元**：Task Group。Group 必须是 LLM 可直接执行的自足信息集合；`Ref: F-xx` 只做追踪，不作为实现上下文依赖。  
+> **执行顺序**：默认严格按 Group 顺序。仅当用户选择自动托管且 Group 依赖/文件冲突检查通过时，才允许并行。
 
-### 📦 Group A: [基础基建/前置模块]
-- **Goal**: [本组交付目标]
-- [ ] **T-A1** | **Create**: `[文件路径]` | [动作描述，如：实现基础数据模型与类型定义] | Ref: F-01
-- [ ] **T-A2** | **Test**: `[测试文件路径]` | [动作描述，如：完成 TS-01 单元测试] | Ref: F-01
+### 📦 Group A: [组名 — 如：骨架与 Mock 数据层]
 
-### 📦 Group B: [核心业务逻辑] (Depends on Group A)
-- **Goal**: [本组交付目标]
-- [ ] **T-B1** | **Modify**: `[文件路径]` | [动作描述] | Ref: F-02
+- **Goal**: [本组结束时用户/开发者能看到什么]
+- **Depends on**: [无 / Group X]
+- **User AC**:
+  - `AC-001`: [本组覆盖的用户可观察验收点，Plain Language]
+- **Local Contract**:
+  - [本组所需 API / DTO / 枚举 / 权限 / 常量 / 业务约束，直接写全]
+- **Files**:
+  - **Create**: `[路径]`
+  - **Modify**: `[路径]`
+  - **Test**: `[spec 路径；没有则写“无”]`
+- **Test Strategy**:
+  - **TDD Units**: [任务 ID + spec + Red/Green 范围；没有则写“无”]
+  - **Unit / Component Checks**: [按项目能力执行的最小目标验证；没有则写“无”]
+  - **Mock Smoke**: [Mock 数据、替身服务或最小可观察记录；没有则写“无”]
+  - **Static Diagnostics**: [本轮变更文件的诊断/规则核对；没有安全局部能力则写 CI/manual 承接]
+- **Verification Contract**:
+  - **Static Diagnostics**: [changed files / none / CI/manual]
+  - **Targeted Test**: [specific behavior or file / none / CI/manual]
+  - **Contract Check**: [fields + enum + permission mapping]
+  - **Smoke Evidence**: [mock/manual observable evidence / none]
+  - **Deferred**: [full regression / integration / e2e by CI/manual]
+- **Group Verify**: [验证意图 + 范围 + 证据要求；避免写死项目命令]
 
-### 🏁 Final Gate（soft；仅**最后一个 Group** 需要填写，用于 QA 阶段 B 收口）
-> **说明**：当最后一批 QA 通过后 Roadmap 将全绿，引擎会给 QA 加上 `[FinalQA=true]` 提示；QA 会在阶段 A 基础上额外执行**一次** `tsc --noEmit` 与下方回归白名单。未填写则只跑 tsc，跳过回归白名单。
-- **Regression spec whitelist（≤ 5 条）**:
-  - `[__tests__/unit/core.spec.ts]`
+- [ ] **T-A1** | **Create**: `[文件路径]` | [一句话动作] | Ref: F-01
+  - **Step 1**: [具体动作；可含关键代码片段]
+  - **Step 2**: […]
+  - **Verify**: [目标验证范围] → `Expected: ...`
 
----
+- [ ] **T-A2 [TDD]** | **Test**: `[spec 路径]` | [先写失败测试再实现的纯逻辑/状态机] | Ref: F-01
+  - **Step 1**: 写失败单测（覆盖本组 Test Strategy 的 TDD Units）
+  - **Verify**: [运行项目支持的单文件/单用例目标验证] → `Expected: FAIL`
+  - **Step 2**: 实现使测试通过
+  - **Verify**: [同一目标验证] → `Expected: PASS`
+  - **Step 3**: 重构或声明无需重构
+  - **Verify**: [同一目标验证] → `Expected: PASS`
 
-## 5. Execution Log (执行摘要与存证)
-<!-- specflow:section=execution-log -->
+### 📦 Group B: [组名] (Depends on A)
 
-> **说明**：由 AI 实时维护。QA 在验证通过或失败时记录证据。
+- **Goal**: […]
+- **Depends on**: Group A
+- **User AC**:
+  - `AC-002`: […]
+- **Local Contract**:
+  - [本组所需 API / DTO / 枚举 / 权限 / 常量 / 业务约束，直接写全]
+- **Files**:
+  - **Create**: `无`
+  - **Modify**: `[...]`
+  - **Test**: `[...]`
+- **Test Strategy**:
+  - **TDD Units**: 无
+  - **Unit / Component Checks**: […]
+  - **Mock Smoke**: […]
+  - **Static Diagnostics**: […]
+- **Verification Contract**:
+  - **Static Diagnostics**: […]
+  - **Targeted Test**: […]
+  - **Contract Check**: […]
+  - **Smoke Evidence**: […]
+  - **Deferred**: […]
+- **Group Verify**: […]
 
-### ✅ 验收存证 (Evidence)
-- （格式：**[Group ID]**: YYYY-MM-DD | Result: [Pass] | Verification: [验证方式] OK | Evidence: [测试日志摘要或证明]）
+- [ ] **T-B1** | **Modify**: `[文件路径]` | […] | Ref: F-02
 
-### ❌ 异常记录 (Blocks)
-- （格式：**[Failed] T-xx**: [报错信息，用于 Bug Fix 修复上下文]）
+### 🏁 Final Gate
 
----
+- **Regression evidence whitelist（≤ 5）**:
+  - `[目标验证项 / 文件 / 行为]`
+- **Final Verify**: [仅执行本项目已证明安全的收口验证；无法安全本地执行则 CI/manual 承接]
 
-## 6. Changelog (修改日志)
-<!-- specflow:section=changelog -->
+### CodeStyle 增量（归档候选）
 
-> **说明**：仅记录开发者主动修改或因需求变更引起的技术方案调整。
-
-- **YYYY-MM-DD**: [变更摘要]
+- [CodeStyle] [section]: [仅当本需求发现全局未覆盖、且可归属到 architecture-layers.md ## Layers 的横切规则时填写] (layers: [layer-id]) (applies: [来自该 layer 的分层级 glob])

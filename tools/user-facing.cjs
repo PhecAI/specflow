@@ -8,6 +8,12 @@
 
 const fs = require('fs')
 const path = require('path')
+const {
+  buildProgressModel,
+  renderProgressModel,
+  mapAgentToUserTitle,
+  mapPhaseToChinese,
+} = require('./progress-model.cjs')
 
 const UTF8 = 'utf-8'
 const TEMPLATE_WHITELIST = new Set([
@@ -30,37 +36,6 @@ function applyVariables(templateBody, variables) {
   })
 }
 
-function mapPhaseToChinese(phase) {
-  switch (phase) {
-    case 'Specify':
-      return '规格梳理'
-    case 'Plan':
-      return '技术方案'
-    case 'Implement':
-      return '开发与验收'
-    case 'Archive':
-      return '归档'
-    default:
-      return '当前阶段'
-  }
-}
-
-function mapAgentToUserTitle(agent, mode) {
-  const a = String(agent || '')
-  const m = String(mode || '')
-  if (a === 'specflow-specify') return '整理并更新需求规格'
-  if (a === 'specflow-specify-review') return '先做一次规格评审'
-  if (a === 'specflow-plan') return '编写技术方案与任务拆分'
-  if (a === 'specflow-implement') return '开始开发当前任务'
-  if (a === 'specflow-qa') return '进行验收检查'
-  if (a === 'specflow-archive') return '完成归档收尾'
-  if (a === 'specflow-domain-explorer') {
-    if (m === 'Merge') return '合并业务知识库'
-    return '梳理业务知识库'
-  }
-  return '推进本需求的下一步工作'
-}
-
 function mapRequirementTemplate(initKind, hasSuggestedId) {
   void hasSuggestedId
   if (initKind === 'conflict') return 'orchestration.requirement_id.conflict'
@@ -68,8 +43,7 @@ function mapRequirementTemplate(initKind, hasSuggestedId) {
 }
 
 function mapInteractionTemplate(questionId) {
-  // 当前无针对单个 question id 的特化模板，统一走通用交互模板。
-  void questionId
+  if (String(questionId || '') === 'confirm_start_plan') return 'orchestration.plan_confirm'
   return 'orchestration.interaction'
 }
 
@@ -77,6 +51,7 @@ function mapGenericTitle(templateId) {
   const id = String(templateId || '')
   if (id === 'orchestration.dispatch') return '下一步'
   if (id === 'orchestration.clarification') return '待确认信息'
+  if (id === 'orchestration.plan_confirm') return '开始技术方案'
   if (id === 'orchestration.interaction') return '需要你的确认'
   if (id.startsWith('orchestration.requirement_id')) return '需求编号确认'
   if (id === 'orchestration.unknown') return '提示'
@@ -86,7 +61,10 @@ function mapGenericTitle(templateId) {
 function renderGenericTemplate(userFacing) {
   const uf = userFacing && typeof userFacing === 'object' ? userFacing : {}
   const title = mapGenericTitle(uf.templateId)
-  const fallback = String(uf.fallbackMessage || '').trim() || '请先确认这一步，我会继续推进。'
+  const fallback =
+    String(uf.fallbackMessage || '').trim() ||
+    renderProgressModel(uf.progress) ||
+    '请先确认这一步，我会继续推进。'
   return `### ${title}\n\n${fallback}`
 }
 
@@ -100,7 +78,7 @@ function loadTemplateBody(pluginRoot, templateId) {
 }
 
 /**
- * 面向用户的残差摘要（中文，不含内部脚本名）。
+ * 面向用户的剩余事项摘要（中文，不含内部脚本名）。
  * @param {object} result - 含 residual、residualDelta、engineTurn
  */
 function buildResidualSummary(result) {
@@ -108,7 +86,7 @@ function buildResidualSummary(result) {
   if (!r || typeof r !== 'object') return ''
   const delta = result.residualDelta
   const turn = result.engineTurn
-  let head = `残差合计：${r.totalScore}`
+  let head = `剩余待处理项：${r.totalScore}`
   if (typeof delta === 'number' && delta !== 0) {
     head += `（${delta < 0 ? '较上轮减少' : '较上轮增加'} ${Math.abs(delta)}`
     if (typeof turn === 'number' && turn > 0) head += `，第 ${turn} 轮审计`
@@ -118,10 +96,10 @@ function buildResidualSummary(result) {
   }
   return [
     head,
-    `- 验收标准未闭环：${r.unmetAcCount}`,
-    `- 最近一次检查未通过项：${r.failedTestsCount}`,
-    `- 待处理前置条件：${r.openGatesCount}`,
-    `- 待补验收证据的任务：${r.missingEvidencesCount}`,
+    `- 验收条件未完成：${r.unmetAcCount}`,
+    `- 验证失败：${r.failedTestsCount}`,
+    `- 流程阻塞：${r.openGatesCount}`,
+    `- 待补验收证据：${r.missingEvidencesCount}`,
   ].join('\n')
 }
 
@@ -147,8 +125,12 @@ function buildUserFacing(result) {
   /** SNR：首行 `Next Actions (Remaining: N)` 的 N 为残差合计 totalScore（无结构化残差时回退 AC 未勾选数） */
   function finish(uf) {
     const rs = buildResidualSummary(result)
+    const progress = uf.progress || buildProgressModel(result)
+    const fallbackMessage = String(uf.fallbackMessage || '').trim() || renderProgressModel(progress)
     return {
       ...uf,
+      progress,
+      fallbackMessage,
       remainingCount,
       variables: { ...(uf.variables || {}), residualSummary: rs },
     }
@@ -234,44 +216,47 @@ function buildUserFacing(result) {
       const q0 = questions[0]
       const qid = q0 && q0.id ? String(q0.id) : ''
       const templateId = mapInteractionTemplate(qid)
+      const progress = buildProgressModel(result)
 
       return finish({
         schemaVersion,
         templateId,
+        progress,
         variables: {},
-        fallbackMessage: '这里需要你先确认一个选项。',
       })
     }
     case 'dispatch': {
       const taskTitle = mapAgentToUserTitle(sa.agent, sa.mode)
       const phaseName = mapPhaseToChinese(phase)
+      const progress = buildProgressModel(result)
       return finish({
         schemaVersion,
         templateId: 'orchestration.dispatch',
+        progress,
         variables: {
           requirementLabel,
           phaseName,
           taskTitle,
         },
-        fallbackMessage: `下一步会先${taskTitle}（需求：${requirementLabel}）。`,
       })
     }
     case 'dispatch_array': {
-      const agents = Array.isArray(sa.agents) ? sa.agents : []
+      const agents = Array.isArray(sa.items) ? sa.items : (Array.isArray(sa.agents) ? sa.agents : [])
       const phaseName = mapPhaseToChinese(phase)
       const names = agents
         .map((a) => mapAgentToUserTitle(a && a.agent, a && a.mode))
         .filter(Boolean)
       const taskTitle = names.length > 0 ? names.join('、') : '推进多个独立任务'
+      const progress = buildProgressModel(result)
       return finish({
         schemaVersion,
         templateId: 'orchestration.dispatch',
+        progress,
         variables: {
           requirementLabel,
           phaseName,
           taskTitle,
         },
-        fallbackMessage: `下一步会先${taskTitle}（需求：${requirementLabel}）。`,
       })
     }
     default:
@@ -376,7 +361,21 @@ function buildDispatchPreviewMarkdown(workspaceRoot, requirementId, scriptsDir) 
       templateId: 'orchestration.dispatch',
       variables: { requirementLabel, phaseName, taskTitle, residualSummary },
       remainingCount,
-      fallbackMessage: `下一步：${taskTitle}（需求：${requirementLabel}）。`,
+      progress: buildProgressModel({
+        phase: data.phase || 'Specify',
+        requirementId: requirementLabel,
+        suggestedAction:
+          data && data.kind === 'dispatch_array'
+            ? {
+                type: 'dispatch_array',
+                items: Array.isArray(data.items) ? data.items : [],
+              }
+            : {
+                type: 'dispatch',
+                agent: data.agent,
+                mode: data.mode,
+              },
+      }),
     },
     pluginRoot,
   )
@@ -391,4 +390,6 @@ module.exports = {
   templateIdToFilename,
   mapAgentToUserTitle,
   mapPhaseToChinese,
+  buildProgressModel,
+  renderProgressModel,
 }

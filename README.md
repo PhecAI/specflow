@@ -25,7 +25,7 @@ SpecFlow 是一套**引擎驱动**的 **SDD（Spec-Driven Development）** AI Co
 
 1. **先判定意图**：本轮是需求交付、规格/合约变更，还是与产品无关的技术排错？需求驱动场景下必须先运行 `specflow-engine` / `orchestrator`，依据 JSON 中的 `suggestedAction` 决策。
 2. **再绑定需求号**：可以尚无编号；引擎通过 `interaction_required` 引导选择或输入，产物写入业务项目的 `ai-docs/<需求号>/`（**不**随本插件仓库分发）。
-3. **Specify**：把模糊意图收敛为可验收的 `specify.md`；阻塞性澄清以 `[?]` 标记，未闭合不得进入 Plan。
+3. **Specify**：先闭合产品/验收澄清，再把模糊意图收敛为可验收的 `specify.md`；正式文档只保留答案，未闭合问题不得进入 Plan。
 4. **Plan**：在规格评审与代码规范评估通过后，产出 `plan.md`（设计、契约、Roadmap）。
 5. **Implement / QA**：按 Roadmap **Group** 推进实现；整组 `ready-for-qa` 后由验收子代理把关，通过才标记完成。
 6. **Change（并行轨）**：PRD、接口字段、契约变动走 `sync-document`，与 implement 链**互斥**——先同步文档，再继续实现。
@@ -69,17 +69,19 @@ npm run install:local
 
 2. **specflow-engine / orchestrator** — 读取 `ai-docs` 物理状态与 `specflow-state.json`，输出当前环节、`suggestedAction`（含 `dispatch`、`interaction_required`、`anchor` 等）。
 
-3. **specifying-specflow** — Specify 阶段。产出 `specify.md`，管理阻塞性 `[?]` 澄清日志。
+3. **Init** — 需求初始化。确定需求号，初始化 `global-assets` 骨架，确认业务领域，确保 `architecture-layers.md` 存在。
 
-4. **specflow-specify-review · specflow-code-style-explorer** — Plan 前门禁：架构师级规格评审；需求级代码规范评估（Referenced / Additions / Overrides）。
+4. **specifying-specflow** — Specify 阶段。先管理产品/验收澄清，再产出不含未闭合问题的 `specify.md`。
 
-5. **planning-specflow** — Plan 阶段。产出 `plan.md`（Feature & Design、Contract、Roadmap）。
+5. **Plan Readiness** — 技术方案准备。架构师级规格评审，技术澄清或放行；门禁状态进入 `.temp/gates.json`。
 
-6. **implementing-specflow · qa-specflow** — 按 Group 实现与验收；`manage-state` / `verify` 驱动状态迁移。
+6. **planning-specflow** — Plan 阶段。参考全局 `code-style` 与 `architecture-layers`，产出 `plan.md`；需求内 code-style 只记录增量。
 
-7. **syncing-specflow-docs** — 需求/合约/方案变更。`sync-document` 更新 `specify` / `plan`，**禁止**与首轮 implement 混用。
+7. **implementing-specflow · qa-specflow** — 按 Group 实现与验收；`manage-state` / `verify` 驱动状态迁移。
 
-8. **archiving-specflow** — 归档。`archive.cjs` 搬运需求目录、更新历史索引、合并全局资产。
+8. **syncing-specflow-docs** — 需求/合约/方案变更。`sync-document` 更新 `specify` / `plan`，**禁止**与首轮 implement 混用。
+
+9. **archiving-specflow** — 归档。`archive.cjs` 搬运需求目录、更新历史索引、合并全局资产。
 
 **显式入口**：用户说「开始 Specflow 交付」时，使用 **`specflow`** 技能启动 implement 链（非 change 链）。
 
@@ -113,7 +115,8 @@ npm run install:local
 | --------------------- | -------------------------------------- |
 | `specflow-engine.cjs` | 环节判定、门禁、`interaction_required` |
 | `orchestrator.cjs`    | `implement` / `change` 编排入口        |
-| `manage-state.cjs`    | 需求状态、Group、评审 ack              |
+| `gates.cjs`           | 统一门禁状态机（`.temp/gates.json`）   |
+| `manage-state.cjs`    | 运行态、Group、评审 ack 兼容入口       |
 | `sync-document.cjs`   | 结构化更新 specify / plan              |
 | `verify.cjs`          | 送测前校验                             |
 | `archive.cjs`         | 物理归档                               |

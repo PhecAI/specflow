@@ -1,6 +1,6 @@
 /**
  * 归档原子操作：按年/季路径创建目录、搬运 ai-docs/{需求号} 下全部文件、更新 ARCHIVE_SUMMARY 索引、删除原目录。
- * 归档后自动执行知识瘦身：精简 specify.md（仅保留 Section 1, 2, 4 作为立项快照）、删除 plan.md。
+ * 归档后自动执行知识瘦身：精简 specify.md（仅保留需求概览、功能切片快照；兼容旧版产品决策）、删除 plan.md。
  * 执行前须已在 ai-docs/{需求号}/ 下生成 summary.md（可由 AI 在 Archive 阶段先填写）；本脚本不生成 summary 内容。
  *
  * 用法:
@@ -11,14 +11,16 @@
 
 const fs = require('fs');
 const path = require('path');
+const { blockGate } = require('./gates.cjs');
+const { mergeState } = require('./specflow-state.cjs');
 const { parseMarkdownTree, findByKey, renderNode, renderNodeShallow } = require('./plan-parser.cjs');
 
 const UTF8 = 'utf-8';
 
 /**
  * 精简 specify.md（使用健壮的 AST 解析器）：
- * 仅保留 H1 标题 + Executive Summary + User Roles & Scenarios + Acceptance Criteria。
- * 丢弃已被抽象到领域活文档的 Business Rules，以及过程性的 Clarification Log 和 Changelog。
+ * 新结构保留 H1 标题 + Requirement Overview + Capabilities；兼容旧版 Product Decisions。
+ * 丢弃过程性的 Clarification Log / Decision Log 和 Changelog。
  * @param {string} content - specify.md 原始内容
  * @returns {string} 精简后的内容
  */
@@ -37,8 +39,7 @@ function slimSpecifyContent(content) {
   }
 
   // 2. 按需保留核心章节（利用锚点精确提取，无视用户的额外 H2 排版）
-  const keepKeys = ['executiveSummary', 'userScenarios', 'acceptanceCriteria'];
-  for (const key of keepKeys) {
+  for (const key of ['overview', 'productDecisions', 'capabilities']) {
     const section = findByKey(tree, key);
     if (section) {
       parts.push(renderNode(section));
@@ -46,7 +47,7 @@ function slimSpecifyContent(content) {
   }
 
   let slimmed = parts.join('\n\n---\n\n');
-  slimmed += '\n\n---\n> 归档精简：仅保留业务背景、用户场景与验收标准作为立项快照，完整的长效业务流转规则请查阅当前需求目录下 `business-domains/` 的活体领域文档。\n';
+  slimmed += '\n\n---\n> 归档精简：仅保留需求概览与功能切片作为立项快照，完整的长效业务流转规则请查阅当前需求目录下 `business-domains/` 的活体领域文档。\n';
   return slimmed;
 }
 
@@ -86,6 +87,15 @@ function safeReadJson(filePath, fallback) {
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function pruneArchiveTarget(targetDir, keepNames) {
+  if (!fs.existsSync(targetDir)) return;
+  const keep = new Set(keepNames);
+  for (const entry of fs.readdirSync(targetDir)) {
+    if (keep.has(entry)) continue;
+    fs.rmSync(path.join(targetDir, entry), { recursive: true, force: true });
+  }
 }
 
 function normalizeDomainName(raw) {
@@ -128,12 +138,17 @@ function main() {
 
   const requireSpecify = path.join(sourceDir, 'specify.md');
   const requirePlan = path.join(sourceDir, 'plan.md');
+  const requireSummary = path.join(sourceDir, 'summary.md');
   if (!fs.existsSync(requireSpecify)) {
     console.log(JSON.stringify({ ok: false, error: '缺少 specify.md，禁止归档' }));
     process.exit(1);
   }
   if (!fs.existsSync(requirePlan)) {
     console.log(JSON.stringify({ ok: false, error: '缺少 plan.md，禁止归档' }));
+    process.exit(1);
+  }
+  if (!fs.existsSync(requireSummary)) {
+    console.log(JSON.stringify({ ok: false, error: '缺少 summary.md，禁止归档' }));
     process.exit(1);
   }
 
@@ -145,6 +160,20 @@ function main() {
   }
 
   const tempDir = path.join(sourceDir, '.temp');
+  function recordGlobalMergeFailure(reason) {
+    try {
+      mergeState(sourceDir, { knowledgeReviewed: false });
+      blockGate(sourceDir, 'archive.knowledge_reviewed', {
+        stage: 'Archive',
+        scope: 'requirement',
+        subject: 'knowledge patch review',
+        reason: String(reason || 'global assets merge failed'),
+        evidence: 'archive global merge failed; rerun knowledge reviewer before retrying archive',
+      });
+    } catch (_) {
+      // 失败恢复记录不能掩盖原始归档错误。
+    }
+  }
   // 全局资产合并统一在确认归档后执行（单一入口：archive），严格走结构化合并路径。
   // 若 merge-global-assets.cjs 不可用则归档失败——禁止回退到老 bullet 版本以避免格式漂移。
   let merged = { mergedDomains: [] };
@@ -154,20 +183,26 @@ function main() {
     if (r && r.ok) {
       merged = r;
     } else {
-      console.log(JSON.stringify({ ok: false, error: `全局合并失败：${(r && r.error) || '未知错误'}` }));
+      const error = `全局合并失败：${(r && r.error) || '未知错误'}`;
+      recordGlobalMergeFailure(error);
+      console.log(JSON.stringify({ ok: false, error }));
       process.exit(1);
     }
   } catch (e) {
-    console.log(JSON.stringify({ ok: false, error: `全局合并模块加载失败，禁止降级到老 bullet 合并: ${String(e)}` }));
+    const error = `全局合并模块加载失败，禁止降级到老 bullet 合并: ${String(e)}`;
+    recordGlobalMergeFailure(error);
+    console.log(JSON.stringify({ ok: false, error }));
     process.exit(1);
   }
   if (fs.existsSync(tempDir)) {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 
-  // ── 知识瘦身与物理归档：仅保留 specify.md ──
+  // ── 知识瘦身与物理归档：仅保留 specify.md / summary.md ──
   const sourceSpecify = path.join(sourceDir, 'specify.md');
   const targetSpecify = path.join(targetDir, 'specify.md');
+  const sourceSummary = path.join(sourceDir, 'summary.md');
+  const targetSummary = path.join(targetDir, 'summary.md');
   
   if (fs.existsSync(sourceSpecify)) {
     try {
@@ -181,6 +216,8 @@ function main() {
   } else {
     console.warn(`警告: 未找到源文件 ${sourceSpecify}`);
   }
+  fs.copyFileSync(sourceSummary, targetSummary);
+  pruneArchiveTarget(targetDir, ['specify.md', 'summary.md']);
 
   function removeSourceDir() {
     if (!fs.existsSync(sourceDir)) return;

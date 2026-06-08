@@ -5,27 +5,43 @@
 const fs = require('fs');
 const path = require('path');
 
-/** 完整 specify.md（可进 Plan：含 acceptanceCriteria 实质内容、无未闭合 CQ） */
+/** 完整 specify.md（可进 Plan：含 capabilities/验收要点实质内容、无未闭合 CQ） */
 function specifyComplete(extraInBody = '') {
   return `# Test Requirement
 
-## Executive Summary
-<!-- specflow:section=executive-summary -->
-Summary content.
+## Requirement Overview
+<!-- specflow:section=overview -->
+- **业务背景**: Summary content.
+- **目标**: Test goal.
+- **本期范围**: Test scope.
+- **非目标**: None.
+- **本仓职责边界**: Test workspace.
+- **关键产品决策**:
+  - Test decision.
 
-## User Scenarios
-<!-- specflow:section=user-scenarios -->
-User roles.
+## Capabilities
+<!-- specflow:section=capabilities -->
+### 3.1 Test capability
+- **用户目标**: Complete test.
+- **入口 / 触发条件**: Test entry.
+- **主流程**:
+  1. Do it.
+- **业务规则**:
+  - Rules.
+- **异常与边界**:
+  - None.
+- **权限要求**:
+  - Default.
+- **验收要点**:
+  - **[AC-001]** Done.
 
-## Business Rules
-<!-- specflow:section=business-rules -->
-Rules.
+## Business Objects & States
+<!-- specflow:section=business-objects -->
+- **Object**: Test object.
+- **状态定义**:
+  - Ready: ready.
 
-## Acceptance Criteria
-<!-- specflow:section=acceptance-criteria -->
-- AC-1: Done.
-
-## Clarification Log
+## Decision Log
 <!-- specflow:section=clarification-log -->
 ${extraInBody}
 
@@ -35,12 +51,12 @@ ${extraInBody}
 `;
 }
 
-/** 含 [BLOCKER] 且规格未完成（无 AC）→ 阶段 Specify，走 Specify 分支 block */
+/** 含 [BLOCKER] 且规格未完成（无能力切片）→ 阶段 Specify，走 Specify 分支 block */
 function specifyDraftWithBlocker() {
   return `# Draft
 
-## Executive Summary
-<!-- specflow:section=executive-summary -->
+## Requirement Overview
+<!-- specflow:section=overview -->
 Text [BLOCKER] in draft.
 
 ## Changelog
@@ -69,14 +85,14 @@ function specifyWithOpenClarification() {
 }
 
 /**
- * 草稿级 specify（无 Acceptance Criteria 实质 → specifyComplete=false，阶段仍为 Specify）
+ * 草稿级 specify（无 Capabilities 实质 → specifyComplete=false，阶段仍为 Specify）
  * → determineAction 默认派发 specflow-specify
  */
 function specifyDraftMinimal() {
   return `# Draft
 
-## Executive Summary
-<!-- specflow:section=executive-summary -->
+## Requirement Overview
+<!-- specflow:section=overview -->
 Draft only.
 
 ## Clarification Log
@@ -90,15 +106,15 @@ Draft only.
 }
 
 /**
- * CQ-Domain-Init：澄清已闭合、仍缺 AC → 阶段 Specify；
+ * CQ-Domain-Init：澄清已闭合、仍缺 Capabilities → 阶段 Specify；
  * 领域文件缺失 → dispatch domain-explorer（非 Merge）
  * 标题需含：缺少 [DomainName] 业务知识库（兼容旧文「领域知识库」）
  */
 function specifyIncompleteDomainCQClosed(domainName = 'Payment') {
   return `# Draft Domain
 
-## Executive Summary
-<!-- specflow:section=executive-summary -->
+## Requirement Overview
+<!-- specflow:section=overview -->
 X.
 
 ## Clarification Log
@@ -123,6 +139,9 @@ X.
  * F-01 出现在 Group 文本中以供 focus 构建。
  */
 function planWithRoadmap(taskLine = '- [ ] Task | F-01 |', extraGroups = '') {
+  const roadmapBody = addDefaultTaskGroupContext(`### 📦 Group A: First
+${taskLine}
+${extraGroups}`)
   return `# Plan
 
 ## Architecture
@@ -140,9 +159,7 @@ Design.
 
 ## Roadmap
 <!-- specflow:section=roadmap -->
-### 📦 Group A: First
-${taskLine}
-${extraGroups}
+${roadmapBody}
 
 ## Execution Log
 <!-- specflow:section=execution-log -->
@@ -154,15 +171,39 @@ Log.
 `;
 }
 
+function addDefaultTaskGroupContext(roadmapBody) {
+  const lines = String(roadmapBody || '').split('\n')
+  const out = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    out.push(line)
+    if (!/^###\s+(?:📦\s*)?Group\s+\w+/i.test(line.trim())) continue
+    let j = i + 1
+    while (j < lines.length && !lines[j].trim()) j++
+    if (j < lines.length && /^\s*-\s+\*\*Goal\*\*\s*[:：]/i.test(lines[j])) continue
+    out.push(
+      '- **Goal**: 完成本组交付',
+      '- **Depends on**: none',
+      '- **User AC**:',
+      '  - AC-001 覆盖本组用户可观察验收点',
+      '- **Local Contract**:',
+      '  - 本组接口、字段、权限与常量保持一致',
+      '- **Files**:',
+      '  - Modify: `src/example.ts`',
+      '- **Test Strategy**:',
+      '  - TDD Units: none',
+      '  - Unit/Component Checks: targeted local checks',
+      '  - Mock Smoke: none',
+      '  - Static Diagnostics: changed files evidence',
+      '- **Group Verify**: AC mapping + Local Contract + targeted evidence',
+    )
+  }
+  return out.join('\n')
+}
+
 /** 全部 [x] 且无其它未完成任务 → 可进 Archive */
 function planAllCompleted() {
   return planWithRoadmap('- [x] Done | F-01 |');
-}
-
-/** 在 plan 中插入 decision-summary（供 confirm_start_group 摘要） */
-function appendPlanDecisionSummary(planMd, summary = 'Plan decision summary') {
-  if (planMd.includes('specflow:decision-summary')) return planMd;
-  return planMd.replace(/\n## Changelog\n/, `\n\n<!-- specflow:decision-summary -->\n${summary}\n<!-- /specflow:decision-summary -->\n\n## Changelog\n`);
 }
 
 /** 含 Roadmap [Blocked] → hasBlockedTask */
@@ -190,6 +231,22 @@ function writeRequirementDir(reqDir, { specify, plan, state, resourceFailed }) {
     const temp = path.join(reqDir, '.temp');
     fs.mkdirSync(temp, { recursive: true });
     fs.writeFileSync(path.join(temp, 'specflow-state.json'), JSON.stringify(state, null, 2), 'utf8');
+    const { passGate } = require('../tools/gates.cjs');
+    if (state.archiveAnchorDone === true) {
+      passGate(reqDir, 'archive.user_anchor', {
+        evidence: 'fixture archive anchor confirmed',
+      });
+    }
+    if (state.domainMerged === true) {
+      passGate(reqDir, 'archive.domain_merged', {
+        evidence: 'fixture domain knowledge merged',
+      });
+    }
+    if (state.knowledgeReviewed === true) {
+      passGate(reqDir, 'archive.knowledge_reviewed', {
+        evidence: 'fixture knowledge reviewed',
+      });
+    }
   }
   if (resourceFailed != null) {
     const temp = path.join(reqDir, '.temp');
@@ -215,9 +272,11 @@ function writeHistoryRequirement(workspaceRoot, requirementId, payload, year = '
 }
 
 function writeBusinessDomain(workspaceRoot, requirementId, name, body = '# Domain\n') {
+  const { domainRefToFileStem } = require('../tools/specflow-state.cjs');
   const d = path.join(workspaceRoot, 'ai-docs', requirementId, 'business-domains');
   fs.mkdirSync(d, { recursive: true });
-  fs.writeFileSync(path.join(d, `${name}.md`), body, 'utf8');
+  const stem = domainRefToFileStem(name) || name;
+  fs.writeFileSync(path.join(d, `${stem}.md`), body, 'utf8');
 }
 
 module.exports = {
@@ -229,7 +288,6 @@ module.exports = {
   specifyIncompleteDomainCQClosed,
   planWithRoadmap,
   planAllCompleted,
-  appendPlanDecisionSummary,
   planWithBlockedTag,
   planWithBlocker,
   planEmptyGroup,
@@ -238,4 +296,3 @@ module.exports = {
   writeRequirementDir,
   writeBusinessDomain,
 };
-

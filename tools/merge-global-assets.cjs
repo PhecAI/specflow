@@ -16,14 +16,14 @@ const path = require('path')
 const {
   normalizeCodingPatchSection,
   normalizeCodingPatchContent,
-  normalizeCodingPatchStrength,
-  stripStrengthPrefix,
-  normalizeContentForDedup,
+  normalizeSourceRequirementIds,
   parseGlobalCodeStyleRules,
+  normalizeContentForDedup,
   stripAppliesSuffix,
-  renderRuleLine,
-  renderRulesByScope,
-  STRENGTH_HARD,
+  stripStrengthPrefix,
+  renderStructuredRulesByLayer,
+  filterCodingPatchesForCodeStyle,
+  replaceMarkdownSection,
 } = require('./code-style.cjs')
 
 const {
@@ -32,6 +32,8 @@ const {
   mergePatchesIntoDomainMd,
   deriveConfidenceStatus,
 } = require('./domain-knowledge.cjs')
+const { normalizeDomainInitRef, domainRefToFileStem } = require('./specflow-state.cjs')
+const { gatePassed } = require('./gates.cjs')
 
 const UTF8 = 'utf-8'
 
@@ -44,9 +46,13 @@ function parseCodeStyleMap(content) {
     if (!rule) continue
     const key = `${section}::${normalizeContentForDedup(rule)}`
     const row = { section, content: rule, sourceRequirementId: null }
+    if (item.strength) row.strength = item.strength
+    const sourceRequirementIds = normalizeSourceRequirementIds(item.sourceRequirementIds)
+    if (sourceRequirementIds.length > 0) {
+      row.sourceRequirementIds = sourceRequirementIds
+    }
     if (Array.isArray(item.applies) && item.applies.length > 0) row.applies = item.applies
-    const strength = normalizeCodingPatchStrength(item.strength)
-    if (strength) row.strength = strength
+    if (Array.isArray(item.layers) && item.layers.length > 0) row.layers = item.layers
     out.set(key, row)
   }
 
@@ -62,25 +68,38 @@ function parseCodeStyleMap(content) {
     const section = normalizeCodingPatchSection(sectionRaw)
     const sourceRequirementId = String(m[3] || '').trim() || null
     const stripped = stripAppliesSuffix(m[2])
-    const strengthSplit = stripStrengthPrefix(stripped.content)
-    const rule = normalizeCodingPatchContent(strengthSplit.content)
+    const strippedStrength = stripStrengthPrefix(stripped.content)
+    const rule = normalizeCodingPatchContent(strippedStrength.content)
     if (!rule) continue
     const key = `${section}::${normalizeContentForDedup(rule)}`
     const row = { section, content: rule, sourceRequirementId }
+    if (strippedStrength.strength) row.strength = strippedStrength.strength
+    const sourceRequirementIds = normalizeSourceRequirementIds(
+      stripped.sourceRequirementIds && stripped.sourceRequirementIds.length > 0
+        ? stripped.sourceRequirementIds
+        : sourceRequirementId,
+    )
+    if (sourceRequirementIds.length > 0) {
+      row.sourceRequirementIds = sourceRequirementIds
+    }
     if (Array.isArray(stripped.applies) && stripped.applies.length > 0) row.applies = stripped.applies
-    if (strengthSplit.strength) row.strength = strengthSplit.strength
-    // 与前一路径合并：取最强 strength + applies 并集
+    if (Array.isArray(stripped.layers) && stripped.layers.length > 0) row.layers = stripped.layers
+    // applies 并集合并
     const prev = out.get(key)
     if (prev) {
-      if (prev.strength === STRENGTH_HARD || row.strength === STRENGTH_HARD) {
-        row.strength = STRENGTH_HARD
-      } else if (!row.strength && prev.strength) {
-        row.strength = prev.strength
-      }
       const appMerged = Array.from(new Set([...(prev.applies || []), ...(row.applies || [])]))
       if (appMerged.length > 0) row.applies = appMerged
+      const layerMerged = Array.from(new Set([...(prev.layers || []), ...(row.layers || [])]))
+      if (layerMerged.length > 0) row.layers = layerMerged
       if (!row.sourceRequirementId && prev.sourceRequirementId) {
         row.sourceRequirementId = prev.sourceRequirementId
+      }
+      const sourceMerged = normalizeSourceRequirementIds([
+        ...(prev.sourceRequirementIds || []),
+        ...(row.sourceRequirementIds || []),
+      ])
+      if (sourceMerged.length > 0) {
+        row.sourceRequirementIds = sourceMerged
       }
     }
     out.set(key, row)
@@ -88,40 +107,62 @@ function parseCodeStyleMap(content) {
   return out
 }
 
-// 全局 code-style.md 渲染：顶部 Rules by Scope（agent 主视图）+ 底部 Rules by Section（人读目录）
-function renderCodeStyleFromMap(ruleMap) {
+function renderRulesByLayerSection(ruleMap) {
   const rows = Array.from(ruleMap.values()).sort((a, b) => {
     if (a.section === b.section) return a.content.localeCompare(b.content)
     return a.section.localeCompare(b.section)
   })
   const lines = [
-    '# Code Style',
-    '',
-    '> 主视图 **Rules by Scope** 按 `applies` 分组；子代理按当前任务文件路径定位相关规则。',
-    '> 次视图 **Rules by Section** 按分类铺陈，供人读与审计。',
-    '',
-    '## Rules by Scope',
+    '> 规则按 layer 分组；layer 定义见 `architecture-layers.md` 的 `## Layers` 章节。',
+    '> `(applies: ...)` 声明规则的生效文件范围；子代理按当前任务路径定位相关规则。',
     '',
   ]
-  lines.push(renderRulesByScope(rows))
-  lines.push('## Rules by Section', '')
-  // 按 section 分组输出
-  const bySection = new Map()
-  for (const row of rows) {
-    const s = row.section
-    if (!bySection.has(s)) bySection.set(s, [])
-    bySection.get(s).push(row)
-  }
-  const sections = Array.from(bySection.keys()).sort()
-  for (const s of sections) {
-    lines.push(`### \`${s}\``)
-    for (const row of bySection.get(s)) {
-      lines.push(renderRuleLine(row))
-    }
-    lines.push('')
-  }
-  if (sections.length === 0) lines.push('- (none)', '')
+  lines.push(renderStructuredRulesByLayer(rows))
   return lines.join('\n')
+}
+
+function renderCodeStyleFromMap(prevStyle, ruleMap) {
+  const base = String(prevStyle || '').trim()
+    ? String(prevStyle || '')
+    : [
+      '# Code Style',
+      '',
+      '> 编码规范与跨层 SOP 的全局事实源。',
+      '> layer id 必须来自 `architecture-layers.md` 的 `## Layers` 章节。',
+      '',
+      '## Rules by Layer',
+      '',
+      '<!-- specflow:section Rules by Layer -->',
+      '<!--',
+      'Rule entry schema:',
+      '### `layer-id`',
+      '- should:',
+      '  - section: rule content (applies: globs)',
+      '-->',
+      '',
+      '_（暂无全局规则，由需求归档逐步填充）_',
+      '',
+      '## SOPs',
+      '',
+      '<!-- specflow:section SOPs -->',
+      '<!--',
+      'SOP entry schema:',
+      '### `sop-id`',
+      '- applies:',
+      '  - scenario or glob',
+      '- layers:',
+      '  - `layer-id`',
+      '- pattern:',
+      '  1. step',
+      '- validation: lint/typecheck/AST/rg/CI/PR checklist',
+      '- reference:',
+      '  - `representative/file`',
+      '-->',
+      '',
+      '_（暂无全局 SOP，由需求归档逐步填充）_',
+      '',
+    ].join('\n')
+  return replaceMarkdownSection(base, 'Rules by Layer', renderRulesByLayerSection(ruleMap))
 }
 
 function safeReadJson(filePath, fallback) {
@@ -137,21 +178,23 @@ function ensureDir(dirPath) {
 }
 
 function normalizeDomainName(raw) {
-  return (
-    String(raw || 'general')
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9\-]/g, '-')
-      .replace(/\-+/g, '-')
-      .replace(/^\-|\-$/g, '') || 'general'
-  )
+  const ref = normalizeDomainInitRef(raw)
+  return domainRefToFileStem(ref)
 }
 
 function canMergeAtCurrentStage(workspaceRoot, requirementId, options = {}) {
   if (options.allowPreArchive === true) return { ok: true }
+  const reqDir = path.join(workspaceRoot, 'ai-docs', requirementId)
+  if (gatePassed(reqDir, 'archive.user_anchor')) return { ok: true }
   const statePath = path.join(workspaceRoot, 'ai-docs', requirementId, '.temp', 'specflow-state.json')
   const state = safeReadJson(statePath, {})
-  if (state && state.archiveAnchorDone === true) return { ok: true }
+  if (state && state.archiveAnchorDone === true) {
+    return {
+      ok: false,
+      error:
+        '归档确认仍停留在旧 state 字段，禁止提前执行全局合并。请先通过归档确认门禁后再由 archive 流程统一合并。',
+    }
+  }
   return {
     ok: false,
     error:
@@ -185,15 +228,18 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
   // 按 domain 分组后一次性合并（domain-knowledge 模块负责分桶/去重/阶梯）
   const patchesByDomain = new Map()
   for (const patch of Array.isArray(knowledgePatches) ? knowledgePatches : []) {
-    const domain = normalizeDomainName(patch.domain || patch.slug || patch.module || 'general')
-    if (!patchesByDomain.has(domain)) patchesByDomain.set(domain, [])
-    patchesByDomain.get(domain).push(patch)
+    const ref = normalizeDomainInitRef(patch.domain || patch.domainRef || patch.slug || patch.module || '')
+    const domain = normalizeDomainName(ref)
+    if (!ref || !domain) continue
+    if (!patchesByDomain.has(domain)) patchesByDomain.set(domain, { ref, patches: [] })
+    patchesByDomain.get(domain).patches.push({ ...patch, domain: ref })
   }
 
-  for (const [domain, patches] of patchesByDomain.entries()) {
+  for (const [domain, grouped] of patchesByDomain.entries()) {
+    const { ref, patches } = grouped
     const domainPath = path.join(domainsDir, `${domain}.md`)
-    const prevText = fs.existsSync(domainPath) ? fs.readFileSync(domainPath, UTF8) : `# ${domain}\n\n`
-    const result = mergePatchesIntoDomainMd(prevText, domain, patches, { requirementId: String(requirementId || '') })
+    const prevText = fs.existsSync(domainPath) ? fs.readFileSync(domainPath, UTF8) : `# ${ref}\n\n`
+    const result = mergePatchesIntoDomainMd(prevText, ref, patches, { requirementId: String(requirementId || '') })
     totalDroppedUi += result.droppedUiCount || 0
 
     // 若本轮没有任何可回流条目（全是 ui / 空），跳过写盘（保持原样）
@@ -208,7 +254,8 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
     // metadata 作为"派生视图"：字段全部可由 sourceRequirementIds 推出；
     // 保留目的是让 CLI / 外部工具不必 parse md 即可读状态。
     metadata[domain] = {
-      domain,
+      domain: ref,
+      domainKey: domain,
       maintainer: 'specflow-knowledge-reviewer',
       sourceRequirementIds: sourceIds,
       status: ladder.status,
@@ -218,21 +265,21 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
     }
   }
 
-  if (Array.isArray(codingPatches) && codingPatches.length > 0) {
+  const codingFilter = filterCodingPatchesForCodeStyle(workspaceRoot, codingPatches)
+  const acceptedCodingPatches = codingFilter.accepted
+  if (acceptedCodingPatches.length > 0) {
     const prevStyle = fs.existsSync(codeStylePath) ? fs.readFileSync(codeStylePath, UTF8) : '# Code Style\n\n'
     const styleMap = parseCodeStyleMap(prevStyle)
-    for (const patch of codingPatches) {
+    for (const patch of acceptedCodingPatches) {
       // Overrides 默认仅本需求生效，不回灌全局；如需提升为全局规则，应人工编辑 standards/code-style.md。
       const kind = String((patch && patch.kind) || 'addition').trim().toLowerCase()
       if (kind === 'override') continue
       const section = normalizeCodingPatchSection(patch.section)
       const rawContent = normalizeCodingPatchContent(patch.content)
       if (!rawContent) continue
-      // 兼容 content 前缀 / 独立 strength 字段
-      const stripped = stripStrengthPrefix(rawContent)
-      const content = stripped.content
-      const strength =
-        stripped.strength || normalizeCodingPatchStrength(patch.strength) || undefined
+      // 向后兼容：剥离历史 [Hard]/[Soft] 前缀
+      const strippedStrength = stripStrengthPrefix(rawContent)
+      const content = strippedStrength.content
       const key = `${section}::${normalizeContentForDedup(content)}`
       const row = {
         section,
@@ -240,21 +287,33 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
         sourceRequirementId:
           String(patch.sourceRequirementId || '').trim() || String(requirementId || '').trim() || null,
       }
+      if (patch.strength || strippedStrength.strength) {
+        row.strength = patch.strength || strippedStrength.strength
+      }
       const incomingApplies = Array.isArray(patch.applies) ? patch.applies.filter(Boolean) : null
+      const incomingLayers = Array.isArray(patch.layers) ? patch.layers.filter(Boolean) : null
       const prev = styleMap.get(key)
+      const sourceRequirementIds = normalizeSourceRequirementIds([
+        ...((prev && prev.sourceRequirementIds) || []),
+        ...normalizeSourceRequirementIds(patch.sourceRequirementIds),
+        row.sourceRequirementId,
+      ])
+      if (sourceRequirementIds.length > 0) {
+        row.sourceRequirementIds = sourceRequirementIds
+      }
       const merged = new Set([
         ...((prev && Array.isArray(prev.applies)) ? prev.applies : []),
         ...((incomingApplies || [])),
       ])
       if (merged.size > 0) row.applies = Array.from(merged)
-      // strength 合并：任一 hard 则 hard
-      if (prev && prev.strength === STRENGTH_HARD) row.strength = STRENGTH_HARD
-      else if (strength === STRENGTH_HARD) row.strength = STRENGTH_HARD
-      else if (prev && prev.strength) row.strength = prev.strength
-      else if (strength) row.strength = strength
+      const mergedLayers = new Set([
+        ...((prev && Array.isArray(prev.layers)) ? prev.layers : []),
+        ...((incomingLayers || [])),
+      ])
+      if (mergedLayers.size > 0) row.layers = Array.from(mergedLayers)
       styleMap.set(key, row)
     }
-    fs.writeFileSync(codeStylePath, renderCodeStyleFromMap(styleMap), UTF8)
+    fs.writeFileSync(codeStylePath, renderCodeStyleFromMap(prevStyle, styleMap), UTF8)
   }
 
   // 合并完成后不保留补丁历史目录，避免持续膨胀
@@ -266,6 +325,7 @@ function mergeKnowledgeIntoGlobalAssets(workspaceRoot, requirementId, options = 
     ok: true,
     mergedDomains: Array.from(mergedDomains),
     droppedUiCount: totalDroppedUi,
+    droppedCodeStyleCount: codingFilter.rejected.length,
   }
 }
 
@@ -291,4 +351,3 @@ if (require.main === module) {
 }
 
 module.exports = { mergeKnowledgeIntoGlobalAssets }
-

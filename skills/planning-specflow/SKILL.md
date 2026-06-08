@@ -3,82 +3,68 @@ name: planning-specflow
 description: Use when the orchestrator dispatches specflow-plan or the requirement is in Plan phase and gates are passed
 ---
 
-# 使用 Specflow 进行技术方案制定（Plan）
+# Planning SpecFlow：技术方案入口
 
-## Overview
+架构师阶段：技术澄清先行，产出**单一** `plan.md`。Implement 读 plan 的 Task Group 即可执行。
 
-在 Plan 阶段生成或更新 `plan.md`（Feature/Design/Contract/Roadmap），并保证后续 Implement 的输入一致、可验。
+## 设计思想
 
-**Core principle：** Plan 是实现的唯一真相源；先对齐 Contract/AC，再拆 Roadmap。
+| 原则 | 含义 |
+| --- | --- |
+| Agent Is Source | 具体写作与门禁以 `agents/specflow-plan.md` 为准。 |
+| Clarify Before Plan | 技术依据不足时生成澄清状态，不写满 plan。 |
+| Self-contained Groups | Roadmap Group 必须自足，Implement 不依赖回读完整 specify。 |
 
-**Violating the letter of this process is violating the spirit of this process.**
+## 使用时机
 
----
+- 编排器派发 `specflow-plan`。
+- 引擎处于 Plan 阶段且门禁已通过。
 
-## When to Use
+## 终态
 
-- 编排器派发 `specflow-plan`
-- 或引擎处于 Plan 阶段且门禁已通过
+- `plan.md` 已生成或更新；或
+- 技术依据不足，已生成技术澄清状态并 blocked，本轮不写 plan。
+
+<HARD-GATE>
+
+产品 `[?]` 未闭合不写 plan。
+技术澄清未闭合不写满 plan。
+不得臆造 API、字段、枚举、错误码、权限码或第三方契约。
+
+</HARD-GATE>
 
 ## 执行真相源
 
-- **子代理提示**：`agents/specflow-plan.md`
+- `agents/specflow-plan.md`
+- `templates/plan-template.md`
+- `docs/user-facing/completion-output-plan.md`
+- `protocols/plan.md`
 
-## 打包资源
+## 流程
 
-- 模板：`templates/plan-template.md`
-- 完成汇报规范：`docs/user-facing/completion-output-plan.md`
-- 协议：`protocols/plan.md`
+1. Phase 0：检查接口、对接、Mock 依据；不足则生成技术澄清状态并 blocked。
+2. 读取 `focusSpecify`；筛选 `knowledgeContext`。
+3. 写 §1：Goal、技术非目标、可选的已确认技术决策、目录、红线、SOP；技术结论优先内联到对应 Group。
+4. 写 §2：Mock 表（如需）+ 常量/Domain + 联调替换清单。
+5. 写 §3：Feature 映射（要点 + Verification Intent，不重复 Roadmap）。
+6. 写 §4：Task Group 作为执行单元；每组内联 Goal / Depends on / User AC / Local Contract / Files / Test Strategy / Group Verify / Task Step+Verify。
+7. 自检可读性与引擎锚点。
 
-## 门禁（必须满足，不能跳过）
+## 反模式
 
-- 优先使用 协议里的 `focusSpecify`；除非明确允许 fallback，否则不要读取完整 `specify.md`。
+- Mock 未授权却写满 `[待确认]` 契约。
+- Feature 与 Roadmap 重复粘贴。
+- 只有任务名，没有 Local Contract / Test Strategy / Verify。
+- 在 plan 里改产品口径。
 
----
+## 自检
 
-## The Iron Law
+- Implement 不读 specify 也能从当前 Task Group 知道用户验收、局部契约、改哪些文件、执行哪些最小验证。
+- Mock 场景 §2.1 可独立支撑 Group A/B。
+- 模板锚点完整；Task ID 兼容 mark-task。
 
-```
-只要要产出或更新 plan.md：
-必须引用/对齐 specify 的 AC，并把 Contract 与 Roadmap 写成可执行输入。
+## 输出契约
 
-STRICTLY PROHIBITED：在 Plan 未通过门禁时推进 Implement。
-```
-
----
-
-## Constraints
-
-- **MUST** 保留模板锚点（`<!-- specflow:section=... -->`）
-- **MUST** Contract/Roadmap 引用的 AC id 来自 specify
-- **MUST** 写入 plan 后按子代理指引清除 plan 锚点（如需）
-
----
-
-## Red Flags — 出现以下念头时立即停止
-
-- “specify 还没完整，但我可以先写 plan”
-- “Contract 先随便写，后面实现时再改”
-- “Roadmap 先堆任务，AC 对不对之后再说”
-
-**以上所有念头都意味着：停止，回到门禁检查与 focusSpecify，对齐后再写 plan。**
-
----
-
-## Quick Reference
-
-| 场景 | 操作 |
-|---|---|
-| 需要写/改 plan.md | 跟随 `agents/specflow-plan.md` + `plan-template.md` |
-| 不确定门禁 | 回到编排（`orchestrating-specflow`）重跑引擎 |
-
----
-
-## 检查清单
-
-```
-Plan 阶段：
-- [ ] specify 门禁已满足
-- [ ] Contract 与 Roadmap 引用的 AC id 来自 specify
-- [ ] 模板锚点保留完好
-```
+- 成功：生成或更新 `plan.md`。
+- 阻塞：生成技术澄清状态并停止，不写完整 plan。
+- 用户可见文本遵循 `docs/user-facing/VOICE.md` 与 `completion-output-plan.md`。

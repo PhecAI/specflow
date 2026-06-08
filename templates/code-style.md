@@ -1,21 +1,35 @@
 # Code Style
 
-> 约定：本文件用于描述“人读建议（[Soft]）”与“机器拦截（[Hard]）”。
-> `[Hard] STYLE-XXXX` 必须在下方对应条目中提供 `> **验证方式**：command:/regex:` 映射，否则 `verify.cjs` 会拦截。
+> 编码规范与跨层 SOP 的全局事实源。
+> layer id 必须来自 `architecture-layers.md` 的 `## Layers` 章节。
 
-## 模式描述模板（机器可解析）
+## Rules by Layer
 
-> **规范编号**：STYLE-0001
-> **适用上下文**：src/**/*.ts
-> **正例/反例**：
-> ```ts
-> // ok
-> ```
-> **验证方式**：command: npm run lint:changed
+<!-- specflow:section Rules by Layer -->
+<!--
+Rule entry schema:
+### `layer-id`
+- should:
+  - section: rule content (applies: globs)
+-->
 
-[Hard] STYLE-0001: 示例强约束（必须可执行）
+_（暂无全局规则，由需求归档逐步填充）_
 
-## Soft 规范（建议）
+## SOPs
 
-- [Soft] STYLE-1001: 示例软约束（建议遵守）
+<!-- specflow:section SOPs -->
+<!--
+SOP entry schema:
+### `sop-id`
+- applies:
+  - scenario or glob
+- layers:
+  - `layer-id`
+- pattern:
+  1. step
+- validation: lint/typecheck/AST/rg/CI/PR checklist
+- reference:
+  - `representative/file`
+-->
 
+_（暂无全局 SOP，由需求归档逐步填充）_
